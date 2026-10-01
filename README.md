@@ -137,7 +137,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   message text include readable labels. Windows NVDA navigation still needs
   platform verification; keyboard and screen-reader support is not complete.
   In the chat view, Tab cycles through the message input, send/voice button,
-  the plus menu, emoji, profile, sidebar toggle, New chat, Settings, search,
+  the plus menu, stickers, emoji, profile, sidebar toggle, New chat, Settings, search,
   and chat filters, then returns to the input. Shift+Tab reverses that order;
   hidden controls are skipped. Messages, reactions and chat rows are not stops
   in this cycle; Alt+Up/Down switches conversations. Menus, dialogs and Settings
@@ -301,7 +301,8 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   if that key is missing, the message explains that voting is available on your
   phone. Creating polls in disappearing-message chats is not yet supported by
   the protocol library's poll API, so ZapFast blocks it instead of ignoring the timer.
-- **Emoji, GIF, and sticker picker.** Search emoji and GIFs, use recent emoji
+- **Emoji, GIF, and sticker picker.** The sticker button between the plus
+  and emoji opens stickers directly. Search emoji and GIFs, use recent emoji
   and stickers, and add stickers to Favorites with a right-click. Favorites
   sync with your phone both ways, and Recent holds only stickers you sent. Emoji autocomplete and
   picker search select their first match; use the arrow keys and Enter to

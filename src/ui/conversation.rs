@@ -1000,13 +1000,34 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     ))
                     .tab_stop(Stop::Attach);
                     composer_tools_menu(app, chat, &tools);
-                    // Plus and emoji sit close together, as a pair.
+                    // Plus, stickers and emoji sit close together. Stickers
+                    // are used far more than the tools behind the plus, so
+                    // they get a button of their own.
+                    ui.add_space(COMPOSER_PAIR_GAP - ui.spacing().item_spacing.x);
+                    let sticker = last_line(ui, line, |ui| theme::icon_button(
+                        ui,
+                        Icon::Sticker,
+                        22.0,
+                        if app.picker == Some(PickerTab::Stickers) {
+                            palette.accent
+                        } else {
+                            palette.secondary
+                        },
+                        palette.text,
+                        &crate::i18n::gettext(app.locale, "Stickers"),
+                    )).tab_stop(Stop::Sticker);
+                    if sticker.clicked() {
+                        if app.composer_tools_open {
+                            app.actions.push(Action::SetComposerTools(false));
+                        }
+                        app.actions.push(Action::TogglePicker(PickerTab::Stickers));
+                    }
                     ui.add_space(COMPOSER_PAIR_GAP - ui.spacing().item_spacing.x);
                     let smile = last_line(ui, line, |ui| theme::icon_button(
                         ui,
                         Icon::Smile,
                         22.0,
-                        if app.picker.is_some() {
+                        if app.picker.is_some_and(|tab| tab != PickerTab::Stickers) {
                             palette.accent
                         } else {
                             palette.secondary

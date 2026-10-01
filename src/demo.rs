@@ -9787,7 +9787,7 @@ mod tests {
             (right - bottom).abs() <= 1.0,
             "send is {right} from the right and {bottom} from the bottom"
         );
-        // The plus mirrors it in the left end, and emoji stays close by.
+        // The plus mirrors it in the left end, and stickers and emoji stay close by.
         let rect = |stop| {
             let id = crate::ui::focus::stops(&ctx)
                 .into_iter()
@@ -9804,8 +9804,12 @@ mod tests {
             (left - right).abs() <= 1.0,
             "plus centre is {left} from the left, send's {right} from the right"
         );
-        let apart = emoji.center().x - plus.center().x;
-        assert!(apart <= 32.0, "plus and emoji are {apart} apart");
+        // Stickers sit between them; each neighbour stays as close.
+        let sticker = rect(crate::ui::focus::Stop::Sticker);
+        let apart = sticker.center().x - plus.center().x;
+        assert!(apart <= 32.0, "plus and stickers are {apart} apart");
+        let apart = emoji.center().x - sticker.center().x;
+        assert!(apart <= 32.0, "stickers and emoji are {apart} apart");
     }
 
     /// The recorder runs discard, time, waveform and send from left to right,
@@ -10044,6 +10048,7 @@ mod tests {
                 Stop::Composer,
                 Stop::Send,
                 Stop::Attach,
+                Stop::Sticker,
                 Stop::Emoji,
                 Stop::ChatSearch,
                 Stop::Profile,
@@ -10162,6 +10167,7 @@ mod tests {
                         Stop::Composer,
                         Stop::Send,
                         Stop::Attach,
+                        Stop::Sticker,
                         Stop::Emoji,
                         Stop::ChatSearch,
                         Stop::Sidebar
