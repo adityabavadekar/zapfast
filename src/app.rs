@@ -588,6 +588,11 @@ pub struct App {
     pub group_name_edit: Option<String>,
     /// Groups whose name or photo change WhatsApp has not answered yet.
     pub group_saving: HashSet<ChatId>,
+    /// Whether group info lists only the members saved as contacts.
+    pub members_contacts_only: bool,
+    /// Groups chosen in "Common members", and its group search.
+    pub common_groups: Vec<ChatId>,
+    pub common_search: String,
     /// New-contact buffers and lookup state.
     pub new_contact_phone: String,
     pub new_contact_name: String,
@@ -1057,6 +1062,9 @@ impl App {
             contact_edit: None,
             group_name_edit: None,
             group_saving: HashSet::new(),
+            members_contacts_only: false,
+            common_groups: Vec::new(),
+            common_search: String::new(),
             new_contact_phone: String::new(),
             new_contact_name: String::new(),
             new_contact_last: String::new(),
@@ -1748,6 +1756,40 @@ impl App {
             named.push((me.to_owned(), "You".to_owned()));
         }
         named
+    }
+
+    /// The people in every one of `groups`, ourselves aside: saved contacts
+    /// first, then by name. Each carries whether they are a saved contact.
+    /// Groups whose members are not known yet cannot narrow it, so they
+    /// make the answer empty rather than pretend.
+    pub fn common_members(&self, groups: &[ChatId]) -> Vec<(String, String, bool)> {
+        let me = self.me.as_deref();
+        let mut lists = groups.iter().map(|id| {
+            self.chat(id)
+                .map(|chat| chat.participants.as_slice())
+                .unwrap_or_default()
+        });
+        let Some(first) = lists.next() else {
+            return Vec::new();
+        };
+        let others: Vec<HashSet<&str>> = lists
+            .map(|members| members.iter().map(String::as_str).collect())
+            .collect();
+        let mut seen = HashSet::new();
+        let mut common: Vec<(String, String, bool)> = first
+            .iter()
+            .filter(|id| Some(id.as_str()) != me && seen.insert(id.as_str()))
+            .filter(|id| others.iter().all(|members| members.contains(id.as_str())))
+            .map(|id| (id.clone(), self.display_name(id), self.is_saved_contact(id)))
+            .collect();
+        common.sort_by(|a, b| {
+            b.2.cmp(&a.2).then_with(|| {
+                a.1.trim_start_matches('~')
+                    .to_lowercase()
+                    .cmp(&b.1.trim_start_matches('~').to_lowercase())
+            })
+        });
+        common
     }
 
     /// Group members matching the active composer mention query.
@@ -10257,6 +10299,58 @@ mod tests {
 
         app.apply(Action::SetVoiceSpeed(4.0), &ctx);
         assert_eq!(app.settings.voice_speed, crate::audio::SPEEDS[4]);
+    }
+
+    #[test]
+    fn common_members_are_those_in_every_chosen_group() {
+        let mut app = app();
+        app.me = Some("me@s.whatsapp.net".into());
+        let mut group = |id: &str, members: &[&str]| {
+            let mut chat = Chat::new(id.into(), id.into());
+            chat.participants = members.iter().map(|m| (*m).to_owned()).collect();
+            app.chats.push(chat);
+        };
+        group(
+            "a@g.us",
+            &[
+                "me@s.whatsapp.net",
+                "1@s.whatsapp.net",
+                "2@s.whatsapp.net",
+                "3@s.whatsapp.net",
+            ],
+        );
+        group(
+            "b@g.us",
+            &["me@s.whatsapp.net", "2@s.whatsapp.net", "3@s.whatsapp.net"],
+        );
+        group("c@g.us", &["3@s.whatsapp.net", "2@s.whatsapp.net"]);
+        group("unknown@g.us", &[]);
+        app.contacts.insert(
+            "3@s.whatsapp.net".into(),
+            Contact {
+                id: "3@s.whatsapp.net".into(),
+                full_name: Some("Zoe".into()),
+                push_name: None,
+                ..Default::default()
+            },
+        );
+        let ids = |groups: &[&str]| {
+            let groups: Vec<ChatId> = groups.iter().map(|g| (*g).to_owned()).collect();
+            app.common_members(&groups)
+                .into_iter()
+                .map(|(id, _, saved)| (id, saved))
+                .collect::<Vec<_>>()
+        };
+        // Saved contacts first, and never ourselves.
+        assert_eq!(
+            ids(&["a@g.us", "b@g.us", "c@g.us"]),
+            [
+                ("3@s.whatsapp.net".into(), true),
+                ("2@s.whatsapp.net".into(), false)
+            ]
+        );
+        assert!(ids(&["a@g.us", "unknown@g.us"]).is_empty());
+        assert!(ids(&[]).is_empty());
     }
 
     #[test]

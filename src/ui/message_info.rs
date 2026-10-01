@@ -4,7 +4,7 @@ use egui::{Align, Frame, Layout, Margin, Sense, vec2};
 
 use super::widgets;
 use crate::app::App;
-use crate::i18n::{gettext, ngettext};
+use crate::i18n::gettext;
 use crate::model::{Action, Delivery, Message, MessageReceipts, Recipient};
 use crate::theme::{self, Icon, Palette};
 
@@ -236,7 +236,7 @@ fn group(app: &mut App, ui: &mut egui::Ui, receipts: &MessageReceipts) {
             app,
             ui,
             &gettext(locale, "Played by"),
-            palette.read,
+            (Icon::DeliveryTicks, palette.read),
             &played,
             |recipient| recipient.played_at,
         );
@@ -245,7 +245,7 @@ fn group(app: &mut App, ui: &mut egui::Ui, receipts: &MessageReceipts) {
         app,
         ui,
         &gettext(locale, "Read by"),
-        palette.read,
+        (Icon::DeliveryTicks, palette.read),
         &receipts.read(),
         |recipient| recipient.read_at,
     );
@@ -253,19 +253,21 @@ fn group(app: &mut App, ui: &mut egui::Ui, receipts: &MessageReceipts) {
         app,
         ui,
         &gettext(locale, "Delivered to"),
-        palette.secondary,
+        (Icon::DeliveryTicks, palette.secondary),
         &receipts.delivered(),
         |recipient| recipient.delivered_at,
     );
-    let remaining = receipts.remaining();
-    if remaining > 0 {
-        ui.add_space(12.0);
-        theme::text(
+    // Named, as the reader wants to know exactly who is still waiting.
+    let mut remaining = receipts.remaining();
+    if !remaining.is_empty() {
+        remaining.sort_by_cached_key(|recipient| app.display_name(&recipient.id).to_lowercase());
+        section(
+            app,
             ui,
-            ngettext(locale, "{} remaining", "{} remaining", remaining as u32)
-                .replace("{}", &remaining.to_string()),
-            theme::regular(13.0),
-            palette.secondary,
+            &gettext(locale, "Not delivered yet"),
+            (Icon::Check, palette.secondary),
+            &remaining,
+            |_| None,
         );
     }
 }
@@ -274,7 +276,7 @@ fn section(
     app: &mut App,
     ui: &mut egui::Ui,
     title: &str,
-    color: egui::Color32,
+    (icon, color): (Icon, egui::Color32),
     recipients: &[&Recipient],
     at: impl Fn(&Recipient) -> Option<i64>,
 ) {
@@ -282,7 +284,7 @@ fn section(
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-        theme::paint_icon(ui, Icon::DeliveryTicks, rect, 16.0, color);
+        theme::paint_icon(ui, icon, rect, 16.0, color);
         theme::text(ui, title, theme::semibold(14.0), palette.text);
     });
     if recipients.is_empty() {

@@ -1128,6 +1128,8 @@ pub enum Dialog {
         chat: ChatId,
         message: String,
     },
+    /// The people the groups in `App::common_groups` share.
+    CommonMembers,
 }
 
 /// One recipient's receipts for one of our group messages.
@@ -1176,8 +1178,8 @@ impl MessageReceipts {
         })
     }
 
-    /// Audience members with no receipt at all.
-    pub fn remaining(&self) -> usize {
+    /// Audience members with no receipt at all, by id.
+    pub fn remaining(&self) -> Vec<&Recipient> {
         self.recipients
             .iter()
             .filter(|recipient| {
@@ -1186,7 +1188,7 @@ impl MessageReceipts {
                     && recipient.read_at.is_none()
                     && recipient.played_at.is_none()
             })
-            .count()
+            .collect()
     }
 
     fn newest_first(&self, at: impl Fn(&Recipient) -> Option<i64>) -> Vec<&Recipient> {
@@ -1898,13 +1900,13 @@ mod tests {
         assert_eq!(ids(receipts.played()), ["e"]);
         assert_eq!(ids(receipts.read()), ["b", "a"]);
         assert_eq!(ids(receipts.delivered()), ["f", "c"]);
-        assert_eq!(receipts.remaining(), 1);
+        assert_eq!(ids(receipts.remaining()), ["d"]);
         let unknown = MessageReceipts {
             recipients: vec![recipient("a", false, Some(1), None, None)],
             ..Default::default()
         };
         assert!(!unknown.audience_known());
-        assert_eq!(unknown.remaining(), 0);
+        assert!(unknown.remaining().is_empty());
     }
 
     #[test]

@@ -624,6 +624,7 @@ fastframe_icons::icons! {
         ChevronRight => lucide "chevron-right",
         ChevronUp => lucide "chevron-up",
         ListChecks => "list-checks",
+        Circle => "circle",
         CircleAlert => lucide "circle-alert",
         CircleCheck => lucide "circle-check",
         CircleX => lucide "circle-x",

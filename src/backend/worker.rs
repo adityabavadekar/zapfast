@@ -11683,11 +11683,11 @@ mod receipt_tests {
             PEER,
             "the privacy id maps to the number"
         );
-        assert_eq!(receipts.remaining(), 1);
+        assert_eq!(receipts.remaining().len(), 1);
         send(&mut worker, other, None, ReceiptType::Delivered);
         let receipts = latest(&events);
         assert_eq!(receipts.delivered()[0].id, other);
-        assert_eq!(receipts.remaining(), 0);
+        assert!(receipts.remaining().is_empty());
         assert_eq!(status(&worker), Delivery::Delivered);
         send(&mut worker, other, None, ReceiptType::Read);
         assert_eq!(status(&worker), Delivery::Read);

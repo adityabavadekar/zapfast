@@ -38,7 +38,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::ConfirmDeleteMessage { .. } => 380.0,
                 Dialog::StickerPack => 420.0,
                 Dialog::StickerMaker => 400.0,
-                Dialog::Forward { .. } => 420.0,
+                Dialog::Forward { .. } | Dialog::CommonMembers => 420.0,
                 Dialog::CreatePoll(_) => 420.0,
                 Dialog::PollResults { .. }
                 | Dialog::InteractiveList { .. }
@@ -84,6 +84,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::MessageInfo { chat, message } => {
                     super::message_info::show(app, ui, &chat, &message)
                 }
+                Dialog::CommonMembers => common_members(app, ui),
             }
         });
     if response.should_close() {
@@ -562,6 +563,213 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
 
 fn forwardable(chat: &crate::model::Chat) -> bool {
     chat.kind != crate::model::ChatKind::Broadcast && !chat.read_only && !chat.locked
+}
+
+/// Picks groups and lists the people every one of them shares.
+fn common_members(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    title(ui, app, "Common members");
+    let mut groups: Vec<(String, String, usize)> = app
+        .chats
+        .iter()
+        .filter(|chat| chat.is_group() && !chat.locked)
+        .map(|chat| {
+            (
+                chat.id.clone(),
+                app.chat_title(chat),
+                chat.participants.len(),
+            )
+        })
+        .collect();
+    groups.sort_by_key(|(_, name, _)| crate::util::search_key(name));
+    let chosen = app.common_groups.clone();
+    let common = app.common_members(&chosen);
+    // Answer first: it is what the dialog is for.
+    let heading = match chosen.len() {
+        0 | 1 => "Choose two or more groups".to_owned(),
+        count => format!("{} people in all {count} groups", common.len()),
+    };
+    theme::text(ui, heading, theme::medium(13.5), palette.text);
+    let unknown = chosen
+        .iter()
+        .filter(|id| app.chat(id).is_none_or(|chat| chat.participants.is_empty()))
+        .count();
+    if unknown > 0 {
+        theme::text(
+            ui,
+            "Members of some chosen groups are not known yet, so nobody can be in all of them.",
+            theme::regular(12.5),
+            palette.secondary,
+        );
+    }
+    let row_height = 30.0;
+    if chosen.len() > 1 && !common.is_empty() {
+        let mut open = None;
+        egui::ScrollArea::vertical()
+            .id_salt("common-members")
+            .max_height(row_height * 6.0)
+            .auto_shrink([false, true])
+            .show_rows(ui, row_height, common.len(), |ui, range| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (member, name, saved) in &common[range] {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_height),
+                        egui::Sense::click(),
+                    );
+                    if ui.is_rect_visible(rect) {
+                        if response.hovered() {
+                            ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
+                        }
+                        let picture = app.avatar(member);
+                        let avatar = egui::Rect::from_center_size(
+                            egui::pos2(rect.left() + 16.0, rect.center().y),
+                            egui::Vec2::splat(24.0),
+                        );
+                        super::widgets::paint_avatar(
+                            ui,
+                            &palette,
+                            avatar,
+                            name.trim_start_matches('~'),
+                            member,
+                            picture.as_deref(),
+                        );
+                        let tag = saved.then(|| {
+                            ui.painter().layout_no_wrap(
+                                "Contact".to_owned(),
+                                theme::regular(11.5),
+                                palette.accent,
+                            )
+                        });
+                        let tag_width = tag.as_ref().map_or(0.0, |tag| tag.size().x + 8.0);
+                        let line = super::widgets::line(
+                            ui,
+                            name,
+                            theme::regular(13.0),
+                            palette.text,
+                            (rect.width() - 40.0 - tag_width).max(1.0),
+                            1,
+                        );
+                        line.paint(
+                            ui,
+                            egui::pos2(rect.left() + 34.0, rect.center().y - line.size().y / 2.0),
+                            palette.text,
+                        );
+                        if let Some(tag) = tag {
+                            ui.painter().galley(
+                                egui::pos2(
+                                    rect.right() - tag.size().x - 4.0,
+                                    rect.center().y - tag.size().y / 2.0,
+                                ),
+                                tag,
+                                palette.accent,
+                            );
+                        }
+                    }
+                    if response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        open = Some(member.clone());
+                    }
+                }
+            });
+        if let Some(member) = open {
+            app.actions
+                .push(Action::ShowDialog(Dialog::ChatInfo(member)));
+        }
+    }
+    ui.add_space(4.0);
+    theme::text(ui, "Groups", theme::medium(12.5), palette.secondary);
+    let width = ui.available_width();
+    super::widgets::search_field(
+        ui,
+        &palette,
+        egui::Id::new("common-members-search"),
+        &mut app.common_search,
+        "Search groups",
+        width,
+    );
+    let needle = crate::util::search_key(app.common_search.trim());
+    // Chosen groups stay on top, so they can be unticked after a search.
+    groups.sort_by_key(|(id, _, _)| !chosen.contains(id));
+    let groups: Vec<_> = groups
+        .into_iter()
+        .filter(|(id, name, _)| {
+            chosen.contains(id)
+                || needle.is_empty()
+                || crate::util::search_key(name).contains(&needle)
+        })
+        .collect();
+    egui::ScrollArea::vertical()
+        .id_salt("common-members-groups")
+        .max_height(row_height * 7.0)
+        .auto_shrink([false, true])
+        .show_rows(ui, row_height, groups.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (id, name, members) in &groups[range] {
+                let mut picked = chosen.contains(id);
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), row_height),
+                    egui::Sense::click(),
+                );
+                if ui.is_rect_visible(rect) {
+                    if response.hovered() {
+                        ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
+                    }
+                    let check = egui::Rect::from_center_size(
+                        egui::pos2(rect.left() + 14.0, rect.center().y),
+                        egui::Vec2::splat(18.0),
+                    );
+                    let (icon, color) = if picked {
+                        (Icon::CircleCheck, palette.accent)
+                    } else {
+                        (Icon::Circle, palette.dim)
+                    };
+                    theme::paint_icon(ui, icon, check, 18.0, color);
+                    let count = ui.painter().layout_no_wrap(
+                        if *members == 0 {
+                            "members unknown".to_owned()
+                        } else {
+                            members.to_string()
+                        },
+                        theme::regular(11.5),
+                        palette.dim,
+                    );
+                    let line = super::widgets::line(
+                        ui,
+                        name,
+                        theme::regular(13.0),
+                        palette.text,
+                        (rect.width() - 44.0 - count.size().x).max(1.0),
+                        1,
+                    );
+                    line.paint(
+                        ui,
+                        egui::pos2(rect.left() + 30.0, rect.center().y - line.size().y / 2.0),
+                        palette.text,
+                    );
+                    ui.painter().galley(
+                        egui::pos2(
+                            rect.right() - count.size().x - 4.0,
+                            rect.center().y - count.size().y / 2.0,
+                        ),
+                        count,
+                        palette.dim,
+                    );
+                }
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    picked = !picked;
+                    if picked {
+                        app.common_groups.push(id.clone());
+                    } else {
+                        app.common_groups.retain(|group| group != id);
+                    }
+                }
+            }
+        });
 }
 
 fn title(ui: &mut egui::Ui, app: &mut App, label: &str) {
@@ -1730,13 +1938,42 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
     }
     ui.add_space(8.0);
     if chat.is_group() && !chat.participants.is_empty() {
-        let members = app.participant_list(&chat);
+        let all = app.participant_list(&chat);
+        let saved = all
+            .iter()
+            .filter(|(member, _)| app.is_saved_contact(member))
+            .count();
         theme::text(
             ui,
-            format!("Members ({})", members.len()),
+            format!("Members ({}) · {saved} your contacts", all.len()),
             theme::medium(12.5),
             palette.secondary,
         );
+        ui.horizontal(|ui| {
+            if super::widgets::filter_chip(
+                ui,
+                &palette,
+                "My contacts only",
+                saved,
+                app.members_contacts_only,
+            )
+            .clicked()
+            {
+                app.members_contacts_only = !app.members_contacts_only;
+            }
+            if super::widgets::filter_chip(ui, &palette, "Common members…", 0, false).clicked() {
+                app.common_groups = vec![chat.id.clone()];
+                app.common_search.clear();
+                app.actions.push(Action::ShowDialog(Dialog::CommonMembers));
+            }
+        });
+        let members: Vec<_> = if app.members_contacts_only {
+            all.into_iter()
+                .filter(|(member, _)| app.is_saved_contact(member))
+                .collect()
+        } else {
+            all
+        };
         ui.add_space(4.0);
         // Limit the visible rows because groups can have thousands of members.
         let row_height = 30.0;

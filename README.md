@@ -98,6 +98,9 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   list and individual receipts are saved locally; later membership changes
   do not change that list. If the original recipients are unknown, ZapFast
   waits for the phone's aggregate status instead of guessing from one reader.
+  Click the ticks on your own group message, or right-click it and choose
+  **Message info**, to see by name who has read it, who has only received it,
+  and who has not received it yet.
   A message that could not be sent says "Not sent" beside its time. ZapFast
   does not retry it; send it again yourself. Timestamps follow the system's
   12-hour or 24-hour clock: the time format on Windows and macOS, and GNOME's
@@ -330,6 +333,10 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   them. Changes made on the phone or by other members arrive as before. Clicking a `chat.whatsapp.com` invite
   link shows the group's name, size, and description, and joins it (or sends a
   join request when admins approve members) without leaving ZapFast.
+  A group's info says how many members are your saved contacts, and **My
+  contacts only** lists just them. **Common members…** lists the people
+  every chosen group shares, your contacts first, from the member lists
+  ZapFast already has.
 - **Presence.** See online, last-seen, and typing status, and send your typing
   status. Like WhatsApp Web, ZapFast shows you as online only while its window
   is focused, and goes offline ten seconds after you switch away or hide it to

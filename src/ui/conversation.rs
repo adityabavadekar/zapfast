@@ -3213,10 +3213,32 @@ fn bubble_frame(
                 }
                 None => content(ui, view, message, cap, reserve, actions),
             };
-            if over_picture && let Some(picture) = slot {
+            let ticks = if over_picture && let Some(picture) = slot {
                 footer_over_picture(ui, &palette, message, picture);
+                None
             } else {
-                footer(ui, &palette, message, slot);
+                footer(ui, &palette, message, slot)
+            };
+            // A group's ticks wait for every member; who has read so far is
+            // one click away rather than only in the context menu.
+            if let Some(ticks) = ticks
+                && view.chat.is_group()
+                && has_message_info(message)
+            {
+                let response = ui
+                    .interact(
+                        ticks.expand(3.0),
+                        ui.id().with(("ticks", &message.id)),
+                        Sense::CLICK,
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(crate::i18n::gettext(view.locale, "Message info").as_ref());
+                if response.clicked() {
+                    actions.push(Action::ShowDialog(Dialog::MessageInfo {
+                        chat: view.chat.id.clone(),
+                        message: message.id.clone(),
+                    }));
+                }
             }
             if matches!(message.content, Content::Poll { .. }) {
                 super::polls::results_button(
@@ -3756,7 +3778,13 @@ fn not_sent(message: &Message) -> bool {
 }
 
 /// Paints the time and ticks at the bubble's right edge without widening it.
-fn footer(ui: &mut egui::Ui, palette: &Palette, message: &Message, slot: Option<Rect>) {
+/// Returns where the ticks went, if the message has them.
+fn footer(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    message: &Message,
+    slot: Option<Rect>,
+) -> Option<Rect> {
     let font = theme::regular(11.0);
     let time = ui.painter().layout_no_wrap(
         crate::util::clock(message.timestamp),
@@ -3794,9 +3822,11 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, message: &Message, slot: Option<
         );
     });
     let mut x = rect.right();
+    let mut placed = None;
     if message.from_me {
         let ticks = Rect::from_center_size(pos2(x - 7.5, rect.center().y), Vec2::splat(15.0));
         widgets::ticks(ui, palette, ticks, message.status);
+        placed = Some(ticks);
         x -= tick_width;
     }
     x -= time.size().x;
@@ -3833,6 +3863,17 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, message: &Message, slot: Option<
         });
         response.on_hover_text(NOT_SENT_HINT);
     }
+    placed
+}
+
+/// Whether "Message info" has anything to say about the message.
+fn has_message_info(message: &Message) -> bool {
+    message.from_me
+        && !matches!(message.content, Content::Revoked { .. })
+        && !matches!(
+            message.status,
+            Delivery::None | Delivery::Pending | Delivery::Failed
+        )
 }
 
 fn reactions(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: &mut Vec<Action>) {
@@ -4158,12 +4199,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     widgets::menu_separator(ui, &palette);
     // The menu holds actions only. Sent, delivery, and read times, per member
     // in a group, live in "Message info".
-    if message.from_me
-        && !matches!(message.content, Content::Revoked { .. })
-        && !matches!(
-            message.status,
-            Delivery::None | Delivery::Pending | Delivery::Failed
-        )
+    if has_message_info(message)
         && widgets::menu_item(
             ui,
             &palette,

@@ -1870,6 +1870,36 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 unlink(app);
                 app.link = LinkStatus::Failed("The archive is encrypted but its OS keyring key is missing. Restore the original keyring; the archive has not been changed".into());
             }
+            "common-members" => {
+                // Two groups that share Jonas and Mira; only the first also
+                // has a member who is not a saved contact.
+                let stranger = "447700900123@s.whatsapp.net";
+                app.contacts.insert(
+                    stranger.to_owned(),
+                    Contact {
+                        id: stranger.to_owned(),
+                        full_name: None,
+                        push_name: Some("Sam".to_owned()),
+                        ..Default::default()
+                    },
+                );
+                let first = "120363012345678901@g.us";
+                let second = "120363098765432109@g.us";
+                for (id, members) in [
+                    (first, vec!["491701111111", "491702222222", "447700900123"]),
+                    (second, vec!["491701111111", "491702222222", "491703333333"]),
+                ] {
+                    if let Some(chat) = app.chat_mut(id) {
+                        chat.participants = members
+                            .into_iter()
+                            .map(|number| format!("{number}@s.whatsapp.net"))
+                            .chain(std::iter::once(ME.to_owned()))
+                            .collect();
+                    }
+                }
+                app.common_groups = vec![first.to_owned(), second.to_owned()];
+                app.dialog = Some(Dialog::CommonMembers);
+            }
             "message-info" => message_info_sample(app, true),
             "message-info-unknown" => message_info_sample(app, false),
             "message-info-partial" => {
@@ -4148,6 +4178,7 @@ mod tests {
             "poll-voted",
             "poll-results",
             "message-info",
+            "common-members",
             "message-info-unknown",
             "message-info-partial",
             "message-info-direct",
