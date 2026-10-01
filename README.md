@@ -37,7 +37,10 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 - **Links to your phone.** Scan a QR code or link with your phone number.
   Recent history is copied to this computer after linking and stored here.
 - **Chats.** See pinned, unread, muted, and archived chats, typing indicators,
-  and message status. Search chats, saved messages, and contacts. The
+  and message status. Search chats, saved messages, and contacts. Message
+  search finds any part of a word in every archived message from an index, so
+  it stays fast however long the history. It ignores case, and accents once
+  the query has three characters. The
   **Search** icon in a chat's header (or **Ctrl+F**) opens a pane beside the
   chat, as in WhatsApp Desktop, listing its matches newest first with the time
   and the line that matched. The calendar narrows them to one day, or lists

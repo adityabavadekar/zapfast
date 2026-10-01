@@ -17,6 +17,7 @@ mod labels;
 pub use labels::{DEFAULT_COLOR, LABEL_LIMIT, NAME_LIMIT};
 mod polls;
 mod receipts;
+mod search;
 mod stickers;
 pub use polls::PollVote;
 pub use stickers::FavoriteSticker;
@@ -350,6 +351,7 @@ impl Archive {
         connection.execute_batch(drafts::SCHEMA)?;
         connection.execute_batch(stickers::SCHEMA)?;
         connection.execute_batch(favorites::SCHEMA)?;
+        connection.execute_batch(&search::schema())?;
         for (table, column, definition) in MIGRATIONS {
             let exists = connection
                 .prepare(&format!("PRAGMA table_info({table})"))?
@@ -363,6 +365,7 @@ impl Archive {
         }
         favorites::adopt_local_marks(&connection)?;
         Self::prune_receipts(&connection)?;
+        search::backfill(&connection)?;
         Ok(Self { connection })
     }
 
@@ -1036,8 +1039,20 @@ impl Archive {
     }
 
     /// Searches visible message text, filenames, polls, contacts, and places.
-    /// ASCII matching is case-insensitive; other text follows SQLite behavior.
+    /// From three characters on, the trigram index answers, ignoring case
+    /// and accents. Shorter needles scan, where ASCII matching is
+    /// case-insensitive and other text follows SQLite behavior.
     pub fn search_messages(&self, needle: &str, limit: usize) -> Result<Vec<Message>> {
+        if let Some(query) = search::query(needle) {
+            let mut statement = self.connection.prepare_cached(&format!(
+                "SELECT {SEARCH_COLUMNS} FROM messages
+                 WHERE rowid IN (SELECT rowid FROM message_text WHERE message_text MATCH ?1)
+                 ORDER BY timestamp DESC, rowid DESC
+                 LIMIT ?2"
+            ))?;
+            let rows = statement.query_map(params![query, limit as i64], searched_message)?;
+            return rows.collect();
+        }
         let sql = format!(
             "SELECT {SEARCH_COLUMNS}
              FROM messages
@@ -1907,6 +1922,62 @@ pub(crate) mod tests {
                 .expect("day only")),
             vec!["m3".to_owned()]
         );
+    }
+
+    #[test]
+    fn the_search_index_follows_edits_and_deletions() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1@s.whatsapp.net";
+        archive.ensure_chat(chat, "Ada").expect("chat");
+        let mut row = message(chat, "m", 10, false);
+        row.content = Content::text("Dinner at the Café tonight");
+        archive.insert_message(&row, None).expect("insert");
+        let ids = |needle: &str| {
+            archive
+                .search_messages(needle, 10)
+                .expect("search")
+                .into_iter()
+                .map(|hit| hit.id)
+                .collect::<Vec<_>>()
+        };
+        // Inside a word, in another case, and without the accent.
+        assert_eq!(ids("inne"), ["m"]);
+        assert_eq!(ids("cafe TON"), ["m"]);
+        assert_eq!(ids("\"quoted\""), Vec::<String>::new());
+        // Filing the same message again does not duplicate it.
+        archive.insert_message(&row, None).expect("insert");
+        assert_eq!(ids("dinner"), ["m"]);
+        row.content = Content::text("Lunch instead");
+        archive.insert_message(&row, None).expect("edit");
+        assert!(ids("dinner").is_empty());
+        assert_eq!(ids("lunch"), ["m"]);
+        archive.delete_message(chat, "m").expect("delete");
+        assert!(ids("lunch").is_empty());
+    }
+
+    #[test]
+    fn an_archive_from_before_the_index_is_indexed_once_on_opening() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("archive.db");
+        let chat = "1@s.whatsapp.net";
+        {
+            let archive = Archive::open_with_key(&path, &[7; 32]).unwrap();
+            archive.ensure_chat(chat, "Ada").unwrap();
+            let mut row = message(chat, "old", 10, false);
+            row.content = Content::text("filed before the index");
+            archive.insert_message(&row, None).unwrap();
+            // As an archive written by an earlier version would be.
+            archive
+                .connection
+                .execute_batch(
+                    "DROP TABLE message_text; DELETE FROM meta WHERE key = 'message_text_v1';",
+                )
+                .unwrap();
+        }
+        let archive = Archive::open_with_key(&path, &[7; 32]).unwrap();
+        let hits = archive.search_messages("before the", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "old");
     }
 
     #[test]
