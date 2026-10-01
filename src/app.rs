@@ -908,7 +908,6 @@ impl App {
                 ThemeChoice::Light => Palette::light(),
                 _ => Palette::dark(),
             });
-        let open_chat = settings.last_chat.clone();
         let locale = crate::i18n::resolve(settings.interface_language);
         // With a password set, ZapFast starts locked.
         let app_lock = crate::app_lock::AppLock::new(settings.app_lock_hash.is_some());
@@ -937,7 +936,9 @@ impl App {
             chats: Vec::new(),
             contacts: HashMap::new(),
             conversations: HashMap::new(),
-            open_chat,
+            // Launching shows the chat list with nothing open: reopening the
+            // last chat marked whatever had arrived in it as read unseen.
+            open_chat: None,
             scroll_chat_into_view: None,
             drafts: HashMap::new(),
             draft_mentions: HashMap::new(),
@@ -1400,7 +1401,7 @@ impl App {
 
     /// Drops every trace of a chat that no longer exists. Unlike hiding a
     /// locked chat this discards the draft, because there is nothing left to
-    /// send it to, and it clears `last_chat` so a restart does not reopen it.
+    /// send it to.
     fn forget_chat(&mut self, id: &str) {
         self.leave_chat(id);
         self.chats.retain(|chat| chat.id != id);
@@ -1411,9 +1412,6 @@ impl App {
         self.unread_kept.remove(id);
         if self.scroll_chat_into_view.as_deref() == Some(id) {
             self.scroll_chat_into_view = None;
-        }
-        if self.settings.last_chat.as_deref() == Some(id) {
-            self.settings.last_chat = None;
         }
     }
 
@@ -3178,10 +3176,6 @@ impl App {
             .is_some_and(|chat| chat.unread > 0 || chat.marked_unread)
         {
             self.mark_read(&id);
-        }
-        if self.settings.last_chat.as_deref() != Some(id.as_str()) {
-            self.settings.last_chat = Some(id);
-            self.mark_settings_dirty();
         }
     }
 
@@ -8056,7 +8050,6 @@ mod tests {
             .merge(vec![message(chat, "m1", 100)], false);
         app.drafts.insert(chat.into(), "half-written".into());
         app.open_chat = Some(chat.into());
-        app.settings.last_chat = Some(chat.into());
         app.unread_kept.insert(chat.into());
         app.scroll_chat_into_view = Some(chat.into());
         app.search_hits.push(message(chat, "m1", 100));
@@ -8087,8 +8080,6 @@ mod tests {
         // is nothing left to send it to.
         assert!(!app.drafts.contains_key(chat));
         assert_eq!(app.open_chat, None);
-        // A restart must not try to reopen a chat that is gone.
-        assert_eq!(app.settings.last_chat, None);
         // Nothing may keep pointing at a chat that is gone.
         assert!(!app.unread_kept.contains(chat));
         assert_eq!(app.scroll_chat_into_view, None);
@@ -10160,19 +10151,19 @@ mod tests {
     }
 
     #[test]
-    fn locked_last_chat_is_not_restored_from_a_snapshot() {
+    fn launching_opens_no_chat_and_reads_nothing() {
         let root = tempfile::tempdir().unwrap();
-        let settings = Settings {
-            last_chat: Some("locked".into()),
-            ..Default::default()
-        };
+        // A settings file from a version that remembered the last chat.
+        let settings: Settings =
+            serde_json::from_str(r#"{"last_chat": "1@s.whatsapp.net"}"#).unwrap();
         let (mut app, events) = App::headless(AppDirs::under(root.path()), settings);
-        let mut chat = Chat::new("locked".into(), "Fixture".into());
-        chat.locked = true;
+        let mut chat = Chat::new("1@s.whatsapp.net".into(), "Fixture".into());
+        chat.unread = 3;
         events.send(Event::Chats(vec![chat])).unwrap();
         app.handle_events();
         assert!(app.open_chat.is_none());
         assert!(app.conversations.is_empty());
+        assert_eq!(app.chat("1@s.whatsapp.net").unwrap().unread, 3);
     }
 
     #[test]
@@ -10274,7 +10265,6 @@ mod tests {
         assert_eq!(app.composer, "");
         app.open_chat("1@s.whatsapp.net".into());
         assert_eq!(app.composer, "hello ada");
-        assert_eq!(app.settings.last_chat.as_deref(), Some("1@s.whatsapp.net"));
     }
 
     #[test]

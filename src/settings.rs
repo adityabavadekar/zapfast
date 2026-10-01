@@ -411,8 +411,6 @@ pub struct Settings {
     /// ZapFast's own copy of the chosen wallpaper image, drawn in place of the
     /// colour and doodles in light and dark mode alike.
     pub wallpaper_image: Option<std::path::PathBuf>,
-    /// Last open chat, restored at startup.
-    pub last_chat: Option<String>,
     /// The hint bar under the composer, hidden with its × and shown again
     /// from the Keyboard shortcuts dialog.
     pub show_shortcut_hints: bool,
@@ -493,7 +491,6 @@ impl Default for Settings {
             wallpaper_color: WallpaperColor::Theme,
             dark_wallpaper_color: WallpaperColor::Theme,
             wallpaper_image: None,
-            last_chat: None,
             show_shortcut_hints: true,
             recent_emoji: Vec::new(),
             reaction_emoji: Vec::new(),
