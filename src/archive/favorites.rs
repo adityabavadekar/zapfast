@@ -86,7 +86,7 @@ impl Archive {
     /// Adds a favorite at the end of the list, or removes one, and queues the
     /// change for the phone. Returns whether anything changed.
     pub fn set_favorite(&self, chat: &str, favorite: bool) -> Result<bool> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         let changed = if favorite {
             self.connection.execute(
                 "INSERT OR IGNORE INTO favorites (chat, jid, position)
@@ -128,7 +128,7 @@ impl Archive {
         {
             return Ok(None);
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         let before = self.favorites()?;
         self.connection.execute("DELETE FROM favorites", [])?;
         let mut seen = HashSet::new();
@@ -177,7 +177,7 @@ impl Archive {
     /// The phone accepted our list, made at `at`, holding every change up to
     /// `through`. Later changes stay queued.
     pub fn favorites_sent(&self, through: i64, at: i64) -> Result<()> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         self.connection.execute(
             "DELETE FROM favorite_changes WHERE seq <= ?1",
             params![through],

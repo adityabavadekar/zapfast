@@ -397,6 +397,8 @@ pub struct App {
     /// Outgoing message being edited.
     pub editing: Option<String>,
     composing: bool,
+    /// The chat whose first send was last prepared while typing.
+    prepared_send: Option<ChatId>,
     last_keystroke: Option<Instant>,
     pub search: String,
     /// Chat result reached with the arrow keys in the global search field.
@@ -957,6 +959,7 @@ impl App {
             editing: None,
             unsent_voice: None,
             composing: false,
+            prepared_send: None,
             last_keystroke: None,
             search: String::new(),
             search_selected: None,
@@ -3262,6 +3265,14 @@ impl App {
     /// Updates typing state after composer changes.
     pub fn note_keystroke(&mut self) {
         self.last_keystroke = Some(Instant::now());
+        // Typing is the surest sign a send is coming: have its first-send
+        // setup ready by Enter. Independent of sharing the typing state.
+        if let Some(chat) = self.open_chat.clone()
+            && self.prepared_send.as_ref() != Some(&chat)
+        {
+            self.prepared_send = Some(chat.clone());
+            self.backend.send(Command::PrepareSend(chat));
+        }
         if !self.composing
             && self.settings.send_typing
             && let Some(chat) = self.open_chat.clone()
@@ -10351,6 +10362,30 @@ mod tests {
         );
         assert!(ids(&["a@g.us", "unknown@g.us"]).is_empty());
         assert!(ids(&[]).is_empty());
+    }
+
+    #[test]
+    fn typing_prepares_the_first_send_once_per_chat() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        app.settings.send_typing = false;
+        let prepared = |commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::PrepareSend(chat) => Some(chat),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.note_keystroke();
+        app.note_keystroke();
+        // Even with the typing state kept private.
+        assert_eq!(prepared(&mut commands), ["1@s.whatsapp.net"]);
+        app.open_chat = Some("2@s.whatsapp.net".into());
+        app.note_keystroke();
+        assert_eq!(prepared(&mut commands), ["2@s.whatsapp.net"]);
     }
 
     #[test]

@@ -54,6 +54,39 @@ pub struct Archive {
 
 pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
+/// A transaction that nests: inside an open [`Archive::begin_batch`] it is a
+/// savepoint, so atomic steps keep working while a batch is being written.
+/// Dropping it without [`Scope::commit`] rolls its writes back.
+pub(crate) struct Scope<'a> {
+    connection: &'a Connection,
+    open: bool,
+}
+
+impl Scope<'_> {
+    pub(crate) fn commit(mut self) -> Result<()> {
+        self.open = false;
+        self.connection.execute_batch("RELEASE scope")
+    }
+}
+
+impl Drop for Scope<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            let _ = self
+                .connection
+                .execute_batch("ROLLBACK TO scope; RELEASE scope");
+        }
+    }
+}
+
+impl std::ops::Deref for Scope<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.connection
+    }
+}
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS chats (
     id TEXT PRIMARY KEY,
@@ -341,6 +374,33 @@ impl Archive {
 
     pub fn in_memory() -> Result<Self> {
         Self::prepare(Connection::open_in_memory()?)
+    }
+
+    pub(crate) fn scope(&self) -> Result<Scope<'_>> {
+        self.connection.execute_batch("SAVEPOINT scope")?;
+        Ok(Scope {
+            connection: &self.connection,
+            open: true,
+        })
+    }
+
+    /// Starts writing many rows as one transaction, until [`Self::end_batch`].
+    /// Each commit re-encrypts and writes its pages, so a history chunk filed
+    /// message by message spends most of its time committing.
+    pub fn begin_batch(&self) -> Result<()> {
+        self.connection.execute_batch("SAVEPOINT batch")
+    }
+
+    /// Commits the open batch. If that fails, its writes are rolled back
+    /// rather than left in a transaction that never ends.
+    pub fn end_batch(&self) -> Result<()> {
+        let committed = self.connection.execute_batch("RELEASE batch");
+        if committed.is_err() && !self.connection.is_autocommit() {
+            let _ = self
+                .connection
+                .execute_batch("ROLLBACK TO batch; RELEASE batch");
+        }
+        committed
     }
 
     fn prepare(connection: Connection) -> Result<Self> {
@@ -919,7 +979,8 @@ impl Archive {
     /// keeps the reactions already stored. Inserting a message is therefore one
     /// write instead of a read followed by a write.
     pub fn insert_message(&self, message: &Message, raw: Option<&[u8]>) -> Result<()> {
-        self.connection.execute(
+        // Cached: history files thousands of messages in a row.
+        self.connection.prepare_cached(
             "INSERT INTO messages (chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, raw, thumbnail, mentions, forwarded, delivered_at, read_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(chat, id) DO UPDATE SET
@@ -942,7 +1003,8 @@ impl Archive {
                 forwarded = excluded.forwarded,
                 delivered_at = COALESCE(delivered_at, excluded.delivered_at),
                 read_at = COALESCE(read_at, excluded.read_at)",
-            params![
+        )?
+        .execute(params![
                 message.chat,
                 message.id,
                 message.sender,
@@ -967,10 +1029,11 @@ impl Archive {
                 status_rank(Delivery::Failed),
             ],
         )?;
-        self.connection.execute(
-            "UPDATE chats SET last_activity = MAX(last_activity, ?2) WHERE id = ?1",
-            params![message.chat, message.timestamp],
-        )?;
+        self.connection
+            .prepare_cached(
+                "UPDATE chats SET last_activity = MAX(last_activity, ?2) WHERE id = ?1",
+            )?
+            .execute(params![message.chat, message.timestamp])?;
         Ok(())
     }
 
@@ -1332,7 +1395,7 @@ impl Archive {
     /// Atomically removes only the range the linked device knew about, keeping
     /// newer messages and a durable barrier against replay after restart.
     pub fn remove_chat_through(&self, chat: &str, through: i64, delete: bool) -> Result<Removed> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         let through = self
             .removal_point(chat)?
             .map_or(through, |old| old.max(through));

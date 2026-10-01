@@ -17,7 +17,7 @@ impl Archive {
         id: &str,
         recipients: &[String],
     ) -> Result<()> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         transaction.query_row(
             "SELECT 1 FROM messages WHERE chat = ?1 AND id = ?2 AND from_me = 1",
             params![chat, id],
@@ -92,7 +92,7 @@ impl Archive {
         id: &str,
         receipts: &[(String, Delivery, i64)],
     ) -> Result<bool> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         for (recipient, status, at) in receipts {
             self.file_receipt(chat, id, recipient, *status, *at)?;
         }
@@ -116,7 +116,7 @@ impl Archive {
     /// Moves a group message's ticks to its least advanced saved recipient.
     /// Returns whether the message's state changed.
     pub fn settle_group(&self, chat: &str, id: &str) -> Result<bool> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         let (rank, delivered_at, read_at, played_at): (
             Option<i64>,
             Option<i64>,
@@ -149,7 +149,7 @@ impl Archive {
     /// them: the message row keeps a direct chat's delivery times. Returns the
     /// furthest state reached and when, if the message moved.
     pub fn settle_direct(&self, chat: &str, id: &str) -> Result<Option<(Delivery, i64)>> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         let (rank, delivered_at, read_at, played_at): (
             Option<i64>,
             Option<i64>,
@@ -240,7 +240,7 @@ impl Archive {
 
     /// A privacy id and a phone number identify one person, not two readers.
     pub(super) fn merge_group_recipient(&self, lid: &str, pn: &str) -> Result<()> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction = self.scope()?;
         transaction.execute(
             "INSERT INTO group_receipts (chat, id, recipient, expected, status, delivered_at, read_at, played_at)
              SELECT chat, id, ?2, expected, status, delivered_at, read_at, played_at
@@ -330,6 +330,46 @@ mod tests {
         );
         drop(archive);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn atomic_steps_nest_inside_a_batch_and_the_batch_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("archive.db");
+        let group = "123-456@g.us";
+        {
+            let archive = Archive::open_with_key(&path, &[7; 32]).unwrap();
+            archive.ensure_chat(group, "Group").unwrap();
+            archive.begin_batch().unwrap();
+            for id in ["m", "n"] {
+                archive
+                    .insert_message(&super::super::tests::message(group, id, 100, true), None)
+                    .unwrap();
+            }
+            archive
+                .snapshot_group_recipients(group, "m", &["a@lid".into()])
+                .unwrap();
+            // A failed step rolls back only its own writes.
+            assert!(
+                archive
+                    .snapshot_group_recipients(group, "missing", &["a@lid".into()])
+                    .is_err()
+            );
+            archive
+                .group_receipt(group, "m", "a@lid", Delivery::Read, 150)
+                .unwrap();
+            // Learning a number moves favorites and receipts, atomically too.
+            archive.put_lid("a", "4911").unwrap();
+            archive.end_batch().unwrap();
+            assert!(archive.connection.is_autocommit());
+        }
+        let archive = Archive::open_with_key(&path, &[7; 32]).unwrap();
+        assert!(archive.message(group, "n").unwrap().is_some());
+        assert_eq!(
+            archive.message(group, "m").unwrap().unwrap().status,
+            Delivery::Read
+        );
+        assert!(archive.receipts(group, "missing").unwrap().is_empty());
     }
 
     #[test]

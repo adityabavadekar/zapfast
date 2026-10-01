@@ -172,6 +172,9 @@ pub enum Command {
         chat: ChatId,
         composing: bool,
     },
+    /// Fetches what a first send to `chat` would wait for (a group's members,
+    /// their devices, encryption sessions) while the reader is still typing.
+    PrepareSend(ChatId),
     /// Stores the open chat's unsent text, so it survives a restart.
     SaveDraft {
         chat: ChatId,

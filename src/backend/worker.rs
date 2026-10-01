@@ -509,6 +509,7 @@ pub async fn run(
         pending_avatars: HashMap::new(),
         channel_pictures: Default::default(),
         sticker_fetches: HashSet::new(),
+        prepared_sends: HashMap::new(),
         sticker_downloads: HashSet::new(),
         recent_hashes: HashMap::new(),
         emoji_cache: HashMap::new(),
@@ -783,6 +784,8 @@ struct Worker {
     channel_pictures: channel_pictures::ChannelPictures,
     /// Active recent-sticker downloads by hash.
     sticker_fetches: HashSet<String>,
+    /// When each chat's first send was last prepared; see `prepare_send`.
+    prepared_sends: HashMap<ChatId, Instant>,
     /// Active chat-sticker downloads by chat and message id.
     sticker_downloads: HashSet<(ChatId, String)>,
     /// Content hashes of the stickers last listed in Recent, by file.
@@ -3834,7 +3837,13 @@ impl Worker {
                             .sum::<usize>()
                     );
                 }
+                if let Err(error) = self.archive.begin_batch() {
+                    log::warn!("history is filed without a batch: {error}");
+                }
                 let filed = self.apply_history(parsed, !on_demand);
+                if let Err(error) = self.archive.end_batch() {
+                    log::warn!("could not commit a history chunk: {error}");
+                }
                 if on_demand {
                     self.answer_older(filed);
                 }
@@ -4351,6 +4360,7 @@ impl Worker {
                     }
                 });
             }
+            Command::PrepareSend(chat) => self.prepare_send(chat),
             Command::MarkRead { chat, receipts } => self.mark_read(chat, receipts),
             Command::MarkUnread(chat) => match self.archive.mark_unread(&chat) {
                 Ok(marked) => {
@@ -6916,6 +6926,58 @@ impl Worker {
         });
     }
 
+    /// Warms whatsapp-rust's caches for a first send to `chat`: a group's
+    /// routing (members and addressing), every recipient's device list, and
+    /// an encryption session with each device. A first send otherwise waits
+    /// for all three (about a second); after this it finds them cached.
+    /// At most once per chat in `PREPARE_AGAIN`, so typing never turns into
+    /// a stream of queries.
+    fn prepare_send(&mut self, chat: ChatId) {
+        const PREPARE_AGAIN: Duration = Duration::from_secs(10 * 60);
+        if !matches!(ChatKind::from_id(&chat), ChatKind::Group | ChatKind::Direct)
+            || self
+                .prepared_sends
+                .get(&chat)
+                .is_some_and(|at| at.elapsed() < PREPARE_AGAIN)
+        {
+            return;
+        }
+        let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
+            return;
+        };
+        self.prepared_sends.insert(chat, Instant::now());
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let users = if jid.is_group() {
+                match client.groups().routing_info(&jid).await {
+                    Ok(group) => group.participants.clone(),
+                    Err(error) => {
+                        log::debug!("send not prepared: {error}");
+                        return;
+                    }
+                }
+            } else {
+                vec![jid]
+            };
+            let devices = match client.signal().get_user_devices(&users).await {
+                Ok(devices) => devices,
+                Err(error) => {
+                    log::debug!("send not prepared: {error}");
+                    return;
+                }
+            };
+            if let Err(error) = client.signal().assert_sessions(&devices).await {
+                log::debug!("send not fully prepared: {error}");
+            }
+            // Timings and counts only, never who.
+            log::info!(
+                "prepared a send in {} ms ({} devices)",
+                started.elapsed().as_millis(),
+                devices.len()
+            );
+        });
+    }
+
     /// The deleted notice for an archived message, keeping what it said.
     fn revoked(&self, chat: &str, id: &str) -> Content {
         let original = self
@@ -7362,8 +7424,12 @@ async fn send_outgoing(
     message: wa::Message,
     ephemeral_expiration: Option<u32>,
 ) {
+    let started = Instant::now();
+    let mut audience = Duration::ZERO;
+    let mut routed = Duration::ZERO;
+    let group = jid.is_group();
     let result = async {
-        if jid.is_group() {
+        if group {
             // Uses whatsapp-rust's send cache; only a miss queries the server,
             // exactly as encryption would. No separate burst of metadata queries.
             let group = client
@@ -7371,6 +7437,7 @@ async fn send_outgoing(
                 .routing_info(&jid)
                 .await
                 .map_err(|error| error.to_string())?;
+            routed = started.elapsed();
             let lids = group
                 .participants
                 .iter()
@@ -7399,6 +7466,7 @@ async fn send_outgoing(
             if saved.recv().await != Some(true) {
                 return Err("Could not save the group message recipients".to_owned());
             }
+            audience = started.elapsed();
         }
         let mut options = SendOptions::default().with_message_id(id.clone());
         if let Some(expiration) = ephemeral_expiration {
@@ -7411,6 +7479,14 @@ async fn send_outgoing(
         Ok(())
     }
     .await;
+    // Timings only, for reports of slow sends: where the wait was.
+    log::info!(
+        "send took {} ms (group: {group}, members known after {} ms, audience saved after {} ms, ok: {})",
+        started.elapsed().as_millis(),
+        routed.as_millis(),
+        audience.as_millis(),
+        result.is_ok()
+    );
     let _ = commands.send(Command::Sent {
         chat,
         id,
@@ -11336,6 +11412,7 @@ mod receipt_tests {
             pending_avatars: HashMap::new(),
             channel_pictures: Default::default(),
             sticker_fetches: HashSet::new(),
+            prepared_sends: HashMap::new(),
             sticker_downloads: HashSet::new(),
             recent_hashes: HashMap::new(),
             emoji_cache: HashMap::new(),
