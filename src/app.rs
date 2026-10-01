@@ -1629,8 +1629,15 @@ impl App {
         let contact = self.contacts.get(id);
         let present = |name: Option<&str>| name.filter(|name| !name.is_empty()).map(str::to_owned);
         let saved = present(contact.and_then(|contact| contact.full_name.as_deref()));
+        // History once stored a formatted number as the sender's name; a
+        // number is no profile name, so it must not wear the tilde.
+        let named = |name: &&str| {
+            !name
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '+' | ' ' | '-' | '(' | ')'))
+        };
         let called = present(contact.and_then(|contact| contact.push_name.as_deref()))
-            .or_else(|| present(hint));
+            .or_else(|| present(hint.filter(named)));
         // Saved names first, as WhatsApp does; a profile name wears a tilde.
         if let Some(name) = saved.or_else(|| called.map(|name| format!("~{name}"))) {
             return name;

@@ -365,6 +365,8 @@ impl Archive {
         }
         favorites::adopt_local_marks(&connection)?;
         Self::prune_receipts(&connection)?;
+        // Names learned before their privacy id's number was known.
+        Self::merge_lid_contacts(&connection, None)?;
         search::backfill(&connection)?;
         Ok(Self { connection })
     }
@@ -846,6 +848,7 @@ impl Archive {
             params![lid, pn],
         )?;
         self.merge_group_recipient(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"))?;
+        Self::merge_lid_contacts(&self.connection, Some(lid))?;
         let favorite =
             self.move_favorite(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"))?;
         self.connection.execute(
@@ -880,6 +883,26 @@ impl Archive {
             params![format!("{lid}@lid"), format!("{pn}@s.whatsapp.net"), pn],
         )?;
         Ok(changed > 0 || favorite)
+    }
+
+    /// Gives the phone number's contact the names learned under its privacy
+    /// id, for one id or every known one. People are looked up by number once
+    /// it is known, so a name left under the privacy id showed as the number.
+    /// Names already known for the number win.
+    fn merge_lid_contacts(connection: &Connection, lid: Option<&str>) -> Result<()> {
+        connection.execute(
+            "INSERT INTO contacts (id, full_name, first_name, push_name)
+             SELECT l.pn || '@s.whatsapp.net', c.full_name, c.first_name, c.push_name
+             FROM lids l JOIN contacts c ON c.id = l.lid || '@lid'
+             WHERE ?1 IS NULL OR l.lid = ?1
+             ON CONFLICT(id) DO UPDATE SET
+                first_name = CASE WHEN full_name IS NULL THEN excluded.first_name
+                    ELSE first_name END,
+                full_name = COALESCE(full_name, excluded.full_name),
+                push_name = COALESCE(push_name, excluded.push_name)",
+            params![lid],
+        )?;
+        Ok(())
     }
 
     pub fn lids(&self) -> Result<Vec<(String, String)>> {
@@ -2033,6 +2056,59 @@ pub(crate) mod tests {
         let hits = archive.search_messages("e", 1).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "m3", "newest first");
+    }
+
+    #[test]
+    fn names_learned_under_a_privacy_id_follow_it_to_the_number() {
+        let named = |push: &str| Contact {
+            id: "111@lid".into(),
+            push_name: Some(push.into()),
+            ..Default::default()
+        };
+        let archive = Archive::in_memory().expect("opens");
+        archive.upsert_contact(&named("Bob")).expect("contact");
+        archive.put_lid("111", "4911").expect("mapping");
+        let contact = archive
+            .contact("4911@s.whatsapp.net")
+            .expect("reads")
+            .expect("the number has the name");
+        assert_eq!(contact.push_name.as_deref(), Some("Bob"));
+        // A name the number already has is not replaced.
+        archive.upsert_contact(&named("Robert")).expect("contact");
+        archive.put_lid("111", "4911").expect("mapping");
+        assert_eq!(
+            archive
+                .contact("4911@s.whatsapp.net")
+                .unwrap()
+                .unwrap()
+                .push_name
+                .as_deref(),
+            Some("Bob")
+        );
+
+        // An archive that learned both before names were carried over.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("archive.db");
+        {
+            let archive = Archive::open_with_key(&path, &[7; 32]).unwrap();
+            archive
+                .connection
+                .execute_batch(
+                    "INSERT INTO lids (lid, pn) VALUES ('222', '4922');
+                     INSERT INTO contacts (id, push_name) VALUES ('222@lid', 'Carol');",
+                )
+                .unwrap();
+        }
+        let archive = Archive::open_with_key(&path, &[7; 32]).unwrap();
+        assert_eq!(
+            archive
+                .contact("4922@s.whatsapp.net")
+                .unwrap()
+                .unwrap()
+                .push_name
+                .as_deref(),
+            Some("Carol")
+        );
     }
 
     #[test]

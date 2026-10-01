@@ -1787,9 +1787,19 @@ impl Worker {
             Ok(false) => {}
             Err(error) => log::warn!("could not remember an id mapping: {error}"),
         }
+        // The archive moved the names learned under the privacy id over to
+        // the number; take the merged contact, as people are now found by it.
+        let number = format!("{pn}@s.whatsapp.net");
+        if self.contacts.contains_key(&format!("{lid}@lid"))
+            && let Ok(Some(contact)) = self.archive.contact(&number)
+        {
+            self.contacts.insert(number.clone(), contact.clone());
+            self.emit(Event::Contacts(vec![contact]));
+            self.refresh_chat_name(&number);
+        }
         // Receipts filed under the privacy id may name messages archived
         // under the phone number.
-        let chat = format!("{pn}@s.whatsapp.net");
+        let chat = number;
         for id in self.archive.waiting_receipts(&chat).unwrap_or_default() {
             self.settle_early_receipts(&chat, &id);
         }
