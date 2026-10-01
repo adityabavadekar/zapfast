@@ -321,7 +321,7 @@ fn add_range(messages: &[Message], ids: &mut Vec<String>, anchor: &str, to: &str
     for message in &messages[from..=to] {
         if !matches!(
             message.content,
-            Content::Revoked | Content::PhoneOnly { .. } | Content::Unsupported { .. }
+            Content::Revoked { .. } | Content::PhoneOnly { .. } | Content::Unsupported { .. }
         ) && !ids.contains(&message.id)
         {
             ids.push(message.id.clone());
@@ -2044,7 +2044,7 @@ impl App {
     /// Whether an outgoing message can still be revoked for everyone.
     pub fn can_revoke(&self, message: &Message) -> bool {
         message.from_me
-            && !matches!(message.content, Content::Revoked)
+            && !matches!(message.content, Content::Revoked { .. })
             && crate::util::now() - message.timestamp <= REVOKE_WINDOW.as_secs() as i64
     }
 
@@ -4069,7 +4069,7 @@ impl App {
                     .get_mut(&chat)
                     .and_then(|conversation| conversation.message_mut(&id))
                 {
-                    message.content = Content::Revoked;
+                    message.content = Content::Revoked { original: None };
                 }
                 self.backend.send(Command::Revoke { chat, id });
             }
@@ -7728,7 +7728,7 @@ mod tests {
         // Shift-click selects everything between the last click and this one,
         // skipping what cannot be forwarded.
         let mut deleted = message(chat, "gone", 4);
-        deleted.content = Content::Revoked;
+        deleted.content = Content::Revoked { original: None };
         app.conversations
             .get_mut(chat)
             .unwrap()
@@ -7756,7 +7756,7 @@ mod tests {
         app.chats = vec![Chat::new(chat.into(), "Ada".into())];
         app.open_chat = Some(chat.into());
         let mut gone = message(chat, "gone", 3);
-        gone.content = Content::Revoked;
+        gone.content = Content::Revoked { original: None };
         app.conversations.entry(chat.into()).or_default().merge(
             vec![
                 message(chat, "first", 1),

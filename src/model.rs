@@ -447,8 +447,12 @@ pub enum Content {
         #[serde(default)]
         state: PollState,
     },
-    /// "This message was deleted."
-    Revoked,
+    /// "This message was deleted." The original stays in the archive, so it
+    /// is kept here to show beneath the notice when it is known.
+    Revoked {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original: Option<Box<Content>>,
+    },
     /// Unsupported content with a user-facing description.
     Unsupported {
         what: String,
@@ -730,7 +734,7 @@ impl Content {
             }
             Self::Contact { display_name, .. } => format!("Contact: {display_name}"),
             Self::Poll { question, .. } => format!("Poll: {question}"),
-            Self::Revoked => "This message was deleted".to_owned(),
+            Self::Revoked { .. } => "This message was deleted".to_owned(),
             Self::Unsupported { what } => format!("Unsupported message ({what})"),
             Self::PhoneOnly {
                 live_location: true,
@@ -1850,6 +1854,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn deleted_messages_filed_before_keeping_originals_still_load() {
+        let old: Content = serde_json::from_str(r#"{"kind":"revoked"}"#).unwrap();
+        assert_eq!(old, Content::Revoked { original: None });
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"kind":"revoked"}"#
+        );
+        let kept = Content::Revoked {
+            original: Some(Box::new(Content::text("see you at six"))),
+        };
+        let json = serde_json::to_string(&kept).unwrap();
+        assert_eq!(serde_json::from_str::<Content>(&json).unwrap(), kept);
+        assert_eq!(kept.summary(), "This message was deleted");
+    }
 
     #[test]
     fn message_receipts_sort_each_recipient_into_one_list() {

@@ -1005,7 +1005,7 @@ mod tests {
             .set_reaction(PEER, &placeholder.id, PEER, false, "👍")
             .unwrap();
         for (id, content) in [
-            ("revoked", Content::Revoked),
+            ("revoked", Content::Revoked { original: None }),
             ("edited", Content::text("edited text")),
             (
                 "other",
@@ -1049,7 +1049,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .content,
-            Content::Revoked
+            Content::Revoked { original: None }
         );
         assert_eq!(
             worker

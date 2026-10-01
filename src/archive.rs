@@ -1251,6 +1251,17 @@ impl Archive {
         rows.collect()
     }
 
+    /// Deleted messages whose original is not kept beside the notice yet.
+    pub fn revoked_with_raw(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT chat, id, raw FROM messages WHERE raw IS NOT NULL AND json_valid(content)
+             AND json_extract(content, '$.kind') = 'revoked'
+             AND json_extract(content, '$.original') IS NULL",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect()
+    }
+
     /// Photo, video, and audio messages with their raw protobuf.
     pub fn media_with_raw(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
         let mut statement = self.connection.prepare(

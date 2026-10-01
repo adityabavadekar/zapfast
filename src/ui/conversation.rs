@@ -2640,7 +2640,7 @@ fn reaction_affordance(
     let can_reply = view.chat.can_send()
         && !matches!(
             message.content,
-            Content::Revoked | Content::PhoneOnly { .. }
+            Content::Revoked { .. } | Content::PhoneOnly { .. }
         );
     let step = REACTION_AFFORDANCE_SIZE + 4.0;
     let outward = if rect.center().x < bubble.rect.center().x {
@@ -3003,7 +3003,7 @@ pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
 
 /// Starts a reply when the response was double-clicked, as the menu's "Reply".
 fn reply_on_double_click(response: &egui::Response, message: &Message, actions: &mut Vec<Action>) {
-    if response.double_clicked() && !matches!(message.content, Content::Revoked) {
+    if response.double_clicked() && !matches!(message.content, Content::Revoked { .. }) {
         actions.push(Action::Reply(message.id.clone()));
     }
 }
@@ -4014,14 +4014,14 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
         },
     );
     widgets::menu_separator(ui, &palette);
-    if !matches!(message.content, Content::Revoked)
+    if !matches!(message.content, Content::Revoked { .. })
         && widgets::menu_item(ui, &palette, Some(Icon::Reply), "Reply")
     {
         actions.push(Action::Reply(message.id.clone()));
     }
     if !matches!(
         message.content,
-        Content::Revoked
+        Content::Revoked { .. }
             | Content::Unsupported { .. }
             | Content::PhoneOnly { .. }
             | Content::Poll { .. }
@@ -4065,7 +4065,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
         && matches!(message.content, Content::Text { .. })
         && age <= crate::app::EDIT_WINDOW.as_secs() as i64;
     let can_revoke = message.from_me
-        && !matches!(message.content, Content::Revoked)
+        && !matches!(message.content, Content::Revoked { .. })
         && age <= crate::app::REVOKE_WINDOW.as_secs() as i64;
     if can_edit && widgets::menu_item(ui, &palette, Some(Icon::Pencil), "Edit") {
         actions.push(Action::Edit(message.id.clone()));
@@ -4159,7 +4159,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     // The menu holds actions only. Sent, delivery, and read times, per member
     // in a group, live in "Message info".
     if message.from_me
-        && !matches!(message.content, Content::Revoked)
+        && !matches!(message.content, Content::Revoked { .. })
         && !matches!(
             message.status,
             Delivery::None | Delivery::Pending | Delivery::Failed
@@ -4695,7 +4695,7 @@ fn content(
             );
             None
         }
-        Content::Revoked => {
+        Content::Revoked { original } => {
             mirrored_row(
                 ui,
                 own,
@@ -4711,6 +4711,23 @@ fn content(
                     );
                 },
             );
+            // The archive kept what it said; show it, dimmed, under the notice.
+            if let Some(original) = original {
+                let said = match original.as_ref() {
+                    Content::Text { text, .. } => text.clone(),
+                    other => other.summary(),
+                };
+                let line = widgets::line(
+                    ui,
+                    &said,
+                    theme::regular(14.0),
+                    palette.dim,
+                    width.max(1.0),
+                    usize::MAX,
+                );
+                let (rect, _) = ui.allocate_exact_size(line.size(), Sense::hover());
+                line.paint(ui, rect.min, palette.dim);
+            }
             None
         }
         Content::PhoneOnly {

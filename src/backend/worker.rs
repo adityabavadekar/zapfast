@@ -536,6 +536,7 @@ pub async fn run(
     worker.backfill();
     worker.backfill_video_notes();
     worker.backfill_view_once();
+    worker.backfill_revoked();
     worker.backfill_interactive();
     worker.relocate_media();
     discard_attachment_staging(&worker.dirs.media_cache_dir());
@@ -1353,7 +1354,7 @@ impl Worker {
             let Ok(Some(existing)) = self.archive.message(&chat, &id) else {
                 continue;
             };
-            if matches!(existing.content, Content::Revoked) {
+            if matches!(existing.content, Content::Revoked { .. }) {
                 continue;
             }
             // Edits do not replace the raw protobuf; keep an edited interactive
@@ -1386,6 +1387,42 @@ impl Worker {
                 started.elapsed()
             );
             self.emit_chats();
+        }
+    }
+
+    /// Recovers what messages deleted before the notice kept it said, from
+    /// the raw message the archive still holds.
+    fn backfill_revoked(&mut self) {
+        const KEY: &str = "revoked_originals";
+        if self.archive.meta(KEY).ok().flatten().as_deref() == Some("1") {
+            return;
+        }
+        let rows = match self.archive.revoked_with_raw() {
+            Ok(rows) => rows,
+            Err(error) => {
+                log::warn!("could not read deleted messages: {error}");
+                return;
+            }
+        };
+        let mut recovered = 0;
+        for (chat, id, raw) in rows {
+            let Some(original) = wa::Message::decode_from_slice(&raw)
+                .ok()
+                .and_then(|message| classify(&message))
+                .filter(|content| !matches!(content, Content::Revoked { .. }))
+            else {
+                continue;
+            };
+            let content = Content::Revoked {
+                original: Some(Box::new(original)),
+            };
+            if let Ok(true) = self.archive.set_content(&chat, &id, &content, false) {
+                recovered += 1;
+            }
+        }
+        let _ = self.archive.set_meta(KEY, "1");
+        if recovered > 0 {
+            log::info!("kept the text of {recovered} deleted messages");
         }
     }
 
@@ -3025,10 +3062,8 @@ impl Worker {
             };
             match protocol.r#type {
                 Some(Type::REVOKE) => {
-                    if let Ok(true) =
-                        self.archive
-                            .set_content(&chat, &target, &Content::Revoked, false)
-                    {
+                    let revoked = self.revoked(&chat, &target);
+                    if let Ok(true) = self.archive.set_content(&chat, &target, &revoked, false) {
                         self.emit_message(&chat, &target);
                         self.emit_chat(&chat);
                     }
@@ -4086,9 +4121,8 @@ impl Worker {
                 );
             }
             for revoked in chat.revoked {
-                let _ = self
-                    .archive
-                    .set_content(&id, &revoked, &Content::Revoked, false);
+                let content = self.revoked(&id, &revoked);
+                let _ = self.archive.set_content(&id, &revoked, &content, false);
             }
             if (metadata || existing.is_none())
                 && let Some(snapshot_unread) = chat.unread
@@ -5824,7 +5858,7 @@ impl Worker {
             .message(chat, id)
             .map_err(|_| unavailable)?
             .ok_or(unavailable)?;
-        if matches!(row.content, Content::Revoked) {
+        if matches!(row.content, Content::Revoked { .. }) {
             return Err(unavailable);
         }
         let raw = self
@@ -6060,7 +6094,7 @@ impl Worker {
         };
         if matches!(
             source.content,
-            Content::Revoked
+            Content::Revoked { .. }
                 | Content::Unsupported { .. }
                 | Content::PhoneOnly { .. }
                 | Content::Poll { .. }
@@ -6882,15 +6916,29 @@ impl Worker {
         });
     }
 
+    /// The deleted notice for an archived message, keeping what it said.
+    fn revoked(&self, chat: &str, id: &str) -> Content {
+        let original = self
+            .archive
+            .message(chat, id)
+            .ok()
+            .flatten()
+            .map(|row| match row.content {
+                Content::Revoked { original } => original,
+                content => Some(Box::new(content)),
+            });
+        Content::Revoked {
+            original: original.flatten(),
+        }
+    }
+
     fn revoke(&mut self, chat: ChatId, id: String) {
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
         };
-        if let Ok(true) = self
-            .archive
-            .set_content(&chat, &id, &Content::Revoked, false)
-        {
+        let revoked = self.revoked(&chat, &id);
+        if let Ok(true) = self.archive.set_content(&chat, &id, &revoked, false) {
             self.emit_message(&chat, &id);
             self.emit_chat(&chat);
         }
@@ -12990,7 +13038,7 @@ mod receipt_tests {
             .unwrap();
         assert!(worker.quote(PEER, Some("original")).unwrap().is_some());
         // A deleted original is not.
-        row.content = Content::Revoked;
+        row.content = Content::Revoked { original: None };
         worker
             .archive
             .insert_message(&row, Some(&original))

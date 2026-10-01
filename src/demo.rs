@@ -753,7 +753,15 @@ pub fn populate(app: &mut App) {
                 once: Some(crate::model::OnceMedia::Photo),
             },
         ),
-        message(ada, "ada-deleted", false, older + 60 * 25, Content::Revoked),
+        message(
+            ada,
+            "ada-deleted",
+            false,
+            older + 60 * 25,
+            Content::Revoked {
+                original: Some(Box::new(Content::text("See you at the station at six"))),
+            },
+        ),
     ];
     let conversation = app.conversations.get_mut(ada).expect("sample chat");
     conversation.messages.splice(0..0, extra);
@@ -3936,7 +3944,7 @@ mod tests {
         assert!(
             ada.messages
                 .iter()
-                .any(|m| matches!(m.content, Content::Revoked))
+                .any(|m| matches!(m.content, Content::Revoked { .. }))
         );
         assert!(ada.messages.iter().any(|m| m.quoted.is_some()));
     }
@@ -7010,7 +7018,7 @@ mod tests {
                 assert!(
                     matches!(
                         row.map(|message| &message.content),
-                        Some(crate::model::Content::Revoked)
+                        Some(crate::model::Content::Revoked { .. })
                     ),
                     "{page}: a revoked message stays as a tombstone"
                 );
@@ -7063,7 +7071,7 @@ mod tests {
                 assert!(
                     matches!(
                         row.map(|message| &message.content),
-                        Some(crate::model::Content::Revoked)
+                        Some(crate::model::Content::Revoked { .. })
                     ),
                     "{page}: the message is revoked in its own chat"
                 );
@@ -8243,7 +8251,13 @@ mod tests {
         let chat = sample_ids()[0].to_owned();
         app.conversations.get_mut(&chat).unwrap().messages = vec![
             message(&chat, "text", false, 100, Content::text("Double-click me")),
-            message(&chat, "gone", false, 200, Content::Revoked),
+            message(
+                &chat,
+                "gone",
+                false,
+                200,
+                Content::Revoked { original: None },
+            ),
         ];
         let ctx = egui::Context::default();
         app.attach(&ctx);
