@@ -397,6 +397,7 @@ pub async fn run(
     mut inbox: mpsc::UnboundedReceiver<Command>,
     waker: Waker,
 ) {
+    let opening = Instant::now();
     let archive = loop {
         let path = dirs.archive_db();
         let opened = tokio::task::spawn_blocking(move || Archive::open(&path)).await;
@@ -533,16 +534,35 @@ pub async fn run(
         link_watch: Default::default(),
         forward_queue: None,
     };
+    // Nothing shows until these finish, so a slow start names its step.
+    let mut steps = vec![("archive", opening.elapsed())];
+    let mut step = |name: &'static str, started: Instant| steps.push((name, started.elapsed()));
+    let at = Instant::now();
     worker.load_state();
+    step("state", at);
+    let at = Instant::now();
     worker.backfill();
     worker.backfill_video_notes();
     worker.backfill_view_once();
     worker.backfill_revoked();
     worker.backfill_interactive();
+    step("backfills", at);
+    let at = Instant::now();
     worker.relocate_media();
     discard_attachment_staging(&worker.dirs.media_cache_dir());
     discard_attachment_staging(&worker.dirs.sticker_cache_dir());
+    step("media", at);
+    let at = Instant::now();
     worker.start_bot().await;
+    step("link", at);
+    log::info!(
+        "startup took {}",
+        steps
+            .iter()
+            .map(|(name, took)| format!("{name} {} ms", took.as_millis()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let mut wa_events = wa_events;
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
@@ -640,6 +660,86 @@ fn set_aside_unreadable_archive(dirs: &AppDirs) -> std::io::Result<PathBuf> {
         }
     }
     Ok(kept)
+}
+
+/// The kind of a failed request, safe for the log: protocol errors can
+/// carry identifiers, so only the category is kept.
+fn failure_kind(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if sticker_pace::rate_limited(&error) {
+        "rate limited"
+    } else if sticker_pace::gone(&error)
+        || error.contains("rejected the media reference")
+        || error.contains("expired")
+    {
+        "gone from WhatsApp's servers"
+    } else if [
+        "invalid mac",
+        "sha-256 mismatch",
+        "decryption failed",
+        "too short to contain",
+    ]
+    .iter()
+    .any(|word| error.contains(word))
+    {
+        "failed verification"
+    } else if error.contains("every media host failed") || error.contains("names no hosts") {
+        "media hosts unreachable"
+    } else if ["missing", "no media key", "direct path", "no url"]
+        .iter()
+        .any(|word| error.contains(word))
+    {
+        "incomplete download reference"
+    } else if error.contains("item-not-found") || error.contains("not found") {
+        "not found"
+    } else if ["forbidden", "not-authorized", "status: 401"]
+        .iter()
+        .any(|word| error.contains(word))
+    {
+        "not allowed"
+    } else if error.contains("timeout") || error.contains("timed out") || error.contains("elapsed")
+    {
+        "timed out"
+    } else if ["connect", "socket", "closed", "network"]
+        .iter()
+        .any(|word| error.contains(word))
+    {
+        "connection"
+    } else {
+        "other"
+    }
+}
+
+#[cfg(test)]
+mod failure_kind_tests {
+    use super::failure_kind;
+
+    #[test]
+    fn failures_are_named_by_kind_only() {
+        assert_eq!(
+            failure_kind("HTTP status: 410 Gone"),
+            "gone from WhatsApp's servers"
+        );
+        assert_eq!(failure_kind("iq error: rate-overlimit"), "rate limited");
+        assert_eq!(failure_kind("item-not-found for 123-456@g.us"), "not found");
+        assert_eq!(failure_kind("iq error: forbidden"), "not allowed");
+        assert_eq!(failure_kind("request timed out"), "timed out");
+        assert_eq!(failure_kind("socket closed"), "connection");
+        assert_eq!(
+            failure_kind("the CDN rejected the media reference: Download failed with status: 404"),
+            "gone from WhatsApp's servers"
+        );
+        assert_eq!(failure_kind("invalid MAC signature"), "failed verification");
+        assert_eq!(
+            failure_kind("every media host failed: dns error"),
+            "media hosts unreachable"
+        );
+        assert_eq!(
+            failure_kind("missing media key"),
+            "incomplete download reference"
+        );
+        assert_eq!(failure_kind("something else"), "other");
+    }
 }
 
 /// A short explanation for a failed invite lookup or join. Protocol errors
@@ -2221,7 +2321,11 @@ impl Worker {
                     let permanent = ["item-not-found", "forbidden", "not-authorized"]
                         .iter()
                         .any(|word| text.contains(word));
-                    log::warn!("could not fetch group metadata");
+                    log::warn!(
+                        "could not fetch group metadata: {} ({})",
+                        failure_kind(&text),
+                        if permanent { "final" } else { "will retry" }
+                    );
                     let _ = commands.send(Command::GroupInfoFailed { chat, permanent });
                 }
             }
@@ -5186,8 +5290,13 @@ impl Worker {
                         log::warn!("sticker downloads paused: the server asked to slow down");
                         self.sticker_pace.limited(Instant::now());
                     }
-                    Err(_error) => {
-                        log::warn!("could not fetch a sticker");
+                    // Expected for old stickers: WhatsApp keeps files for a while.
+                    Err(error) if sticker_pace::gone(&error) => {
+                        log::debug!("a recent sticker is no longer on WhatsApp's servers");
+                        self.sticker_failed.insert(hash);
+                    }
+                    Err(error) => {
+                        log::warn!("could not fetch a sticker: {}", failure_kind(&error));
                         self.sticker_failed.insert(hash);
                     }
                 }

@@ -708,7 +708,9 @@ impl Worker {
             })
             .collect();
         if candidates.is_empty() {
-            log::warn!(
+            // The phone's record has nothing to download it with; expected
+            // for old favorites, and nothing here can change it.
+            log::debug!(
                 "could not fetch a favorite sticker: no download references and no local copy"
             );
             return;
@@ -869,7 +871,7 @@ impl Worker {
             }
             // Gone from the servers: rest a week rather than ask each time.
             Err(error) if super::sticker_pace::gone(&error) => {
-                log::warn!(
+                log::debug!(
                     "a favorite sticker is no longer on WhatsApp's servers; asking again in a week"
                 );
                 let _ = self.archive.set_meta(
