@@ -8,6 +8,90 @@ companion device, and has no browser engine. In our Linux test, it opens in
 under a second and uses about 200 MB of idle RAM, compared with 1.13 GB for
 WhatsApp Web and its Chromium processes. [See the measurements](https://zapfast.rocks/benchmarks/).
 
+## About this fork
+
+This is [adityabavadekar/zapfast](https://github.com/adityabavadekar/zapfast),
+a fork of [crmne/zapfast](https://github.com/crmne/zapfast). It follows
+upstream `main` and adds the features and speed work below on top. Everything
+stays local: no server, no telemetry, nothing sent anywhere new.
+
+### Added features
+
+- **Fast global search.** Message search uses a trigram full-text index, so it
+  finds any part of a word in every archived message without scanning them,
+  and ignores accents from three characters on.
+- **Deleted messages keep what they said.** "This message was deleted" shows
+  the original text (or a media label) dimmed underneath, including messages
+  deleted before the update, while the archive still holds them.
+- **Opens with no chat selected,** so launching never marks a chat as read.
+- **Group read receipts by name.** Click the ticks on your own group message to
+  open Message info; members without a receipt are listed by name under
+  "Not delivered yet".
+- **Your contacts in a group.** Group info counts the members saved in your
+  contacts, with a **My contacts only** filter, and **Common members…** lists
+  the people several chosen groups share.
+- **Sticker button** beside the plus in the composer.
+- **Profile names for people who are not contacts.** Names learned under a
+  privacy id follow it to the phone number, and a sender name that is only a
+  number no longer shows as `~number`.
+- **Headless mode.** `zapfast --headless` links (QR code in the terminal) and
+  syncs without a window, for testing over SSH.
+- **Opt-in full history sync.** Start with `ZAPFAST_FULL_SYNC=1` before linking
+  to ask the phone for its full history instead of the recent sync. It is
+  heavy on the phone while it runs.
+- **No automatic updates.** Fork builds never offer upstream's releases, which
+  are signed for upstream and would replace the fork's features. Update by
+  pulling this fork and building again.
+
+### Speed and battery
+
+- **History sync:** each chunk is saved in one transaction; a missing index
+  made every privacy-id mapping rescan the receipts table (quadratic in large
+  syncs); messages are no longer read back twice; chat activity and the chat
+  list update once per chunk or per second instead of per message.
+- **Archive reads:** a 256 MB page cache keeps decrypted pages in memory, and
+  startup's attachment check skips messages without files before parsing them.
+- **Stickers:** the sticker lists stop at the newest stickers instead of
+  grouping every sticker ever received, refreshes are coalesced, and local
+  copies of favorites are found from a cache.
+- **Sending:** the first keystroke in a chat prepares the group's members,
+  devices and encryption sessions, so the first send does not wait for them.
+- **Older messages:** the next page is asked of the phone ahead of scrolling.
+- **Less phone work:** expired stickers no longer ask the phone to re-upload
+  them, and other media asks at most two at a time.
+
+Measured on one link (a recent history sync of a large account):
+
+| | |
+|---|---:|
+| Whole history sync, link to 100% | **about 4x faster** |
+| Saving history | about 3,200 messages a second |
+| Time spent waiting for the phone | about half of the sync |
+
+The phone now sets the pace: for about half of the sync ZapFast is idle,
+waiting for the next chunk the phone packs and uploads.
+
+### Diagnostics
+
+The log names the kind of work and how long it took, never message contents
+or phone numbers: startup steps, each history chunk (size, chats, messages,
+names, read and save times), requests to the phone for older messages and how
+long it took to answer, send timings, any command, event or job that holds
+the backend for 100 ms or more, and why a download or lookup failed.
+
+### Developing
+
+Debug builds compile every dependency without optimization, which makes
+SQLite, SQLCipher and protocol decoding many times slower than in a release.
+For realistic speed while keeping quick rebuilds, add this to your own
+`~/.cargo/config.toml` (not the repository):
+
+```toml
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+```
+
 **Want Spotify just as fast and native?** [Spotifast](https://spotifast.rocks)
 is ZapFast's sibling: the same native interface, for Spotify. Both are built
 on [fastframe](https://github.com/crmne/fastframe), the shared foundation for

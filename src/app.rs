@@ -3489,7 +3489,8 @@ impl App {
         self.toasts.retain(|toast| {
             toast.kind == ToastKind::Error || toast.created.elapsed() < INFO_TOAST_LIFETIME
         });
-        if self.settings.check_for_updates
+        if crate::updates::FOLLOWS_RELEASES
+            && self.settings.check_for_updates
             && !self.backend.is_offline()
             && self
                 .last_update_check

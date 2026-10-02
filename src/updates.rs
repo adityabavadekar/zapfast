@@ -11,6 +11,11 @@ pub use fastframe_update::{
 };
 use fastframe_update::{MacConfig, ReqwestTransport, UpdateConfig};
 
+/// Whether this build follows `CONFIG`'s releases. A fork build must not:
+/// upstream's releases are signed for upstream and would replace the fork's
+/// features with upstream's build. Fork releases are installed by hand.
+pub const FOLLOWS_RELEASES: bool = false;
+
 /// ZapFast's releases and the names its installations have had.
 pub const CONFIG: UpdateConfig = UpdateConfig {
     // Cask and bundle names from before the rename. This also accepts
