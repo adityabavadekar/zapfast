@@ -19,12 +19,6 @@ protocol. These notes are for coding agents and new contributors.
 
 ## Privacy
 
-- The user's archive is personal data. Do not read chat rows, message
-  bodies, contacts, or other user content out of `archive.db` or any
-  exported log, not even read-only. Schema, column existence, and row
-  counts are fine; message contents are not.
-- When a bug report or feature needs the user's data, hand the user the
-  query or command to run and let them report the result back.
 - Never log message contents, phone numbers, keys, or QR payloads at a
   level that ships (see the definition of done); treat existing
   captures of them the same way.
