@@ -1782,14 +1782,28 @@ impl Worker {
             None => builder
                 .with_transport_factory(crate::transport::HappyEyeballsTransportFactory::new()),
         };
+        // WhatsApp reads the linked-device name, version, and icon at pairing.
+        let mut props = DevicePropsOverride::new()
+            .with_os("ZapFast")
+            .with_version(app_version())
+            .with_platform_type(wa::device_props::PlatformType::DESKTOP);
+        // Opt in to the phone's full history at the next link: a recent sync
+        // carries at most 1,000 profile names, so others show as numbers.
+        // The flag belongs with the UWP platform row (see whatsapp-rust).
+        if std::env::var_os("ZAPFAST_FULL_SYNC").is_some() {
+            log::info!("requesting a full history sync at link");
+            props = props
+                .with_platform_type(wa::device_props::PlatformType::UWP)
+                .with_require_full_sync(true)
+                .with_history_sync_config(wa::device_props::HistorySyncConfig {
+                    full_sync_days_limit: Some(365 * 3),
+                    on_demand_ready: Some(true),
+                    complete_on_demand_ready: Some(true),
+                    ..whatsapp_rust::wacore::store::device::default_history_sync_config()
+                });
+        }
         let bot = builder
-            // WhatsApp reads the linked-device name, version, and icon at pairing.
-            .with_device_props(
-                DevicePropsOverride::new()
-                    .with_os("ZapFast")
-                    .with_version(app_version())
-                    .with_platform_type(wa::device_props::PlatformType::DESKTOP),
-            )
+            .with_device_props(props)
             .with_event_handler(UiEvents(sender))
             .build()
             .await;

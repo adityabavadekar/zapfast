@@ -19,6 +19,10 @@ struct Cli {
     /// and ZapFast keeps running in the background. For login autostart.
     #[arg(long)]
     start_hidden: bool,
+    /// Run without a window: link with a QR code printed in the terminal,
+    /// then sync. For testing; stop it with Ctrl+C.
+    #[arg(long)]
+    headless: bool,
 
     /// Start with offline sample chats.
     #[cfg(feature = "demo")]
@@ -207,6 +211,10 @@ fn main() -> eframe::Result<()> {
     logging
         .init()
         .map_err(|error| eframe::Error::AppCreation(error.into()))?;
+    if cli.headless && !demo {
+        zapfast::headless::run(dirs, waker);
+        return Ok(());
+    }
     let settings = settings::Settings::load(&dirs.settings_file());
     let demo_persistence = demo.then(|| dirs.state.join("window.ron"));
 
