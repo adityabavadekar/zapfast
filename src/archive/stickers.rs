@@ -140,9 +140,14 @@ impl Archive {
     /// Raw sticker messages, newest first, to find a sticker's CDN references.
     pub fn sticker_message_raws(&self, limit: usize) -> Result<Vec<Vec<u8>>> {
         let mut statement = self.connection.prepare(
-            "SELECT raw FROM messages
-             WHERE json_extract(content, '$.kind') = 'sticker' AND raw IS NOT NULL
-             ORDER BY timestamp DESC LIMIT ?1",
+            // Chosen from the sticker index first; only those rows' raw
+            // messages are read.
+            "SELECT raw FROM messages WHERE rowid IN (
+                 SELECT rowid FROM messages
+                 WHERE json_extract(content, '$.kind') = 'sticker'
+                 ORDER BY timestamp DESC LIMIT ?1
+             ) AND raw IS NOT NULL
+             ORDER BY timestamp DESC",
         )?;
         let rows = statement.query_map(params![limit as i64], |row| row.get(0))?;
         rows.collect()

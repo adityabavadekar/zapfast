@@ -314,7 +314,21 @@ impl Worker {
     /// the phone's recent stickers and the ones we sent, newest first, minus
     /// those removed from Recent since their last use, and Received, the
     /// stickers others sent that are neither in Recent nor in Favorites.
+    /// Asks for the sticker lists to be sent. Downloads finish one after
+    /// another, and each used to rebuild the lists from the archive, so
+    /// requests within `STICKER_COALESCE` share one rebuild.
     pub(super) fn emit_stickers(&mut self) {
+        if !self.coalesce_stickers {
+            self.send_stickers();
+            return;
+        }
+        if self.stickers_due.is_none() {
+            self.stickers_due = Some(Instant::now() + STICKER_COALESCE);
+        }
+    }
+
+    pub(super) fn send_stickers(&mut self) {
+        self.stickers_due = None;
         let removed = self.archive.removed_recent_stickers().unwrap_or_default();
         let hidden = |hash: &str, used: i64| removed.get(hash).is_some_and(|at| *at >= used);
         let mut seen = HashSet::new();
@@ -754,7 +768,42 @@ impl Worker {
 
     /// A file on this computer holding the sticker with this content hash: in
     /// the phone's recent stickers, stickers from chats, or a pack.
-    fn local_sticker_copy(&self, hash: &str) -> Option<PathBuf> {
+    /// Sent stickers on disk by content hash. Each favorite looked through
+    /// up to `REFERENCE_SEARCH` archived stickers, decoding every one, so a
+    /// sync of fifty favorites read a hundred thousand rows; this is built
+    /// once and kept for `COPIES_FRESH`.
+    fn sent_sticker_copies(&mut self) -> &HashMap<String, PathBuf> {
+        const COPIES_FRESH: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+        let stale = self
+            .sticker_copies
+            .as_ref()
+            .is_none_or(|(built, _)| built.elapsed() > COPIES_FRESH);
+        if stale {
+            let mut copies = HashMap::new();
+            for sticker in self
+                .archive
+                .recent_stickers(REFERENCE_SEARCH, true)
+                .unwrap_or_default()
+            {
+                let Some(hash) = sticker
+                    .raw
+                    .as_deref()
+                    .and_then(|raw| wa::Message::decode_from_slice(raw).ok())
+                    .and_then(|message| {
+                        let found = message.get_base_message().sticker_message.as_option()?;
+                        sticker_hash(found.file_sha256.as_deref(), None)
+                    })
+                else {
+                    continue;
+                };
+                copies.entry(hash).or_insert(sticker.path);
+            }
+            self.sticker_copies = Some((Instant::now(), copies));
+        }
+        &self.sticker_copies.as_ref().expect("built above").1
+    }
+
+    fn local_sticker_copy(&mut self, hash: &str) -> Option<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Ok(phone) = self.archive.phone_stickers() {
             candidates.extend(
@@ -764,14 +813,8 @@ impl Worker {
                     .filter_map(|sticker| sticker.path),
             );
         }
-        if let Ok(rows) = self.archive.recent_stickers(REFERENCE_SEARCH, true) {
-            candidates.extend(rows.into_iter().filter_map(|sticker| {
-                let raw = sticker.raw.as_deref()?;
-                let message = wa::Message::decode_from_slice(raw).ok()?;
-                let found = message.get_base_message().sticker_message.as_option()?;
-                (sticker_hash(found.file_sha256.as_deref(), None).as_deref() == Some(hash))
-                    .then_some(sticker.path)
-            }));
+        if let Some(path) = self.sent_sticker_copies().get(hash) {
+            candidates.push(path.clone());
         }
         candidates.extend(
             self.sticker_packs()

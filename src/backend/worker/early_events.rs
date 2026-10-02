@@ -101,6 +101,19 @@ impl EarlyEvents {
         self.reactions.push_back(reaction);
     }
 
+    /// Whether anything waits for this message, without changing the queue.
+    /// History files hundreds of thousands of messages, nearly all with
+    /// nothing waiting, so this check comes before reading the archive.
+    pub(super) fn waiting(&self, chat: &str, id: &str) -> bool {
+        self.reads
+            .iter()
+            .any(|read| read.chat == chat && read.id == id)
+            || self
+                .reactions
+                .iter()
+                .any(|reaction| reaction.chat == chat && reaction.target == id)
+    }
+
     /// Whether the phone read this message before we had it.
     pub(super) fn take_read(&mut self, chat: &str, id: &str) -> bool {
         let before = self.reads.len();

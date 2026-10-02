@@ -68,6 +68,26 @@ const PHONE_PATIENCE: Duration = Duration::from_secs(30);
 const PHONE_BATCH: i32 = 50;
 /// `HistorySync.sync_type` for on-demand history responses.
 const ON_DEMAND: i32 = 6;
+
+/// How long sticker list requests wait to be sent together.
+const STICKER_COALESCE: Duration = Duration::from_millis(250);
+
+/// A history sync type's name, for the log.
+fn sync_kind(sync_type: i32) -> &'static str {
+    match sync_type {
+        0 => "initial",
+        1 => "initial status",
+        2 => "full",
+        3 => "recent",
+        4 => "push names",
+        5 => "non-blocking data",
+        ON_DEMAND => "on demand",
+        _ => "other",
+    }
+}
+
+/// History chunks received since start, for the log.
+static HISTORY_CHUNKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// Maximum attachment-preview dimension.
 const THUMBNAIL_SIDE: u32 = 96;
 /// WhatsApp's profile pictures are 640 pixels square.
@@ -511,6 +531,11 @@ pub async fn run(
         channel_pictures: Default::default(),
         sticker_fetches: HashSet::new(),
         prepared_sends: HashMap::new(),
+        contact_batch: None,
+        stickers_due: None,
+        sticker_copies: None,
+        chats_sent: None,
+        coalesce_stickers: true,
         sticker_downloads: HashSet::new(),
         recent_hashes: HashMap::new(),
         emoji_cache: HashMap::new(),
@@ -567,15 +592,26 @@ pub async fn run(
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         let deadline = worker.sync_deadline;
+        let stickers_due = worker.stickers_due;
         tokio::select! {
             command = inbox.recv() => {
                 match command {
                     Some(Command::Shutdown) | None => break,
-                    Some(command) => worker.handle_command(command).await,
+                    Some(command) => {
+                        let name = command.name();
+                        let started = Instant::now();
+                        worker.handle_command(command).await;
+                        traced("command", name, started);
+                    }
                 }
             }
             Some(event) = wa_events.recv() => match event {
-                RuntimeEvent::WhatsApp(event) => worker.handle_wa_event(event).await,
+                RuntimeEvent::WhatsApp(event) => {
+                    let kind = event.kind();
+                    let started = Instant::now();
+                    worker.handle_wa_event(event).await;
+                    traced("WhatsApp event", &format!("{kind:?}"), started);
+                }
                 RuntimeEvent::PreferencesRecovered {
                     generation,
                     locks,
@@ -597,24 +633,97 @@ pub async fn run(
                 worker.set_syncing(false);
                 worker.emit_chats();
             }
+            _ = async {
+                match stickers_due {
+                    Some(due) => tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let started = Instant::now();
+                worker.send_stickers();
+                traced("job", "send stickers", started);
+            }
             _ = tick.tick() => {
+                let started = Instant::now();
                 worker.watch_link();
+                traced("job", "watch_link", started);
+                let started = Instant::now();
                 worker.reveal_unconfirmed_after_grace();
+                traced("job", "reveal_unconfirmed_after_grace", started);
+                let started = Instant::now();
                 worker.settle_presence();
+                traced("job", "settle_presence", started);
+                let started = Instant::now();
                 worker.refresh_legacy_preferences();
+                traced("job", "refresh_legacy_preferences", started);
+                let started = Instant::now();
                 worker.expire_older_requests();
+                traced("job", "expire_older_requests", started);
+                let started = Instant::now();
                 worker.retry_avatars();
+                traced("job", "retry_avatars", started);
+                let started = Instant::now();
                 worker.pump_group_info();
+                traced("job", "pump_group_info", started);
+                let started = Instant::now();
                 worker.pump_favorite_stickers();
+                traced("job", "pump_favorite_stickers", started);
+                let started = Instant::now();
                 worker.pump_read_sync();
+                traced("job", "pump_read_sync", started);
+                let started = Instant::now();
                 worker.pump_favorite_chats();
+                traced("job", "pump_favorite_chats", started);
+                let started = Instant::now();
                 worker.pump_poll_votes();
+                traced("job", "pump_poll_votes", started);
+                let started = Instant::now();
                 worker.pump_poll_history();
+                traced("job", "pump_poll_history", started);
+                let started = Instant::now();
                 worker.prune_waiting_receipts();
+                traced("job", "prune_waiting_receipts", started);
             }
         }
     }
     worker.stop_bot().await;
+}
+
+/// At most this many re-upload requests wait on the phone at once.
+const MAX_REUPLOADS: usize = 2;
+static REUPLOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A place among the phone's outstanding re-upload requests, freed on drop.
+/// A request that finds none fails as unavailable, and a later retry asks.
+struct ReuploadSlot;
+
+impl ReuploadSlot {
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        REUPLOADS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |busy| {
+                (busy < MAX_REUPLOADS).then_some(busy + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ReuploadSlot {
+    fn drop(&mut self) {
+        REUPLOADS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Logs anything that held the backend up long enough to notice: nothing
+/// else runs meanwhile, so opening a chat or sending waits behind it.
+/// Names the kind of work only, never its contents.
+fn traced(what: &str, name: &str, started: Instant) {
+    const SLOW: Duration = Duration::from_millis(100);
+    let took = started.elapsed();
+    if took >= SLOW {
+        log::info!("slow {what}: {name} took {} ms", took.as_millis());
+    }
 }
 
 enum RuntimeEvent {
@@ -664,13 +773,14 @@ fn set_aside_unreadable_archive(dirs: &AppDirs) -> std::io::Result<PathBuf> {
 
 /// The kind of a failed request, safe for the log: protocol errors can
 /// carry identifiers, so only the category is kept.
-fn failure_kind(error: &str) -> &'static str {
+pub(crate) fn failure_kind(error: &str) -> &'static str {
     let error = error.to_ascii_lowercase();
     if sticker_pace::rate_limited(&error) {
         "rate limited"
     } else if sticker_pace::gone(&error)
         || error.contains("rejected the media reference")
         || error.contains("expired")
+        || error.contains("no longer available")
     {
         "gone from WhatsApp's servers"
     } else if [
@@ -886,6 +996,18 @@ struct Worker {
     sticker_fetches: HashSet<String>,
     /// When each chat's first send was last prepared; see `prepare_send`.
     prepared_sends: HashMap<ChatId, Instant>,
+    /// When a history chunk last sent the whole chat list.
+    chats_sent: Option<Instant>,
+    /// Sent stickers on disk by content hash, and when that was built.
+    sticker_copies: Option<(Instant, HashMap<String, PathBuf>)>,
+    /// When the requested sticker lists are next sent; see `emit_stickers`.
+    stickers_due: Option<Instant>,
+    /// Whether sticker list requests are coalesced. The event loop sends
+    /// them; tests drive the worker without one, so they send at once.
+    coalesce_stickers: bool,
+    /// Contacts gathered for one interface update while a history chunk
+    /// files its profile names, instead of one update per name.
+    contact_batch: Option<Vec<Contact>>,
     /// Active chat-sticker downloads by chat and message id.
     sticker_downloads: HashSet<(ChatId, String)>,
     /// Content hashes of the stickers last listed in Recent, by file.
@@ -2108,7 +2230,11 @@ impl Worker {
         if let Err(error) = self.archive.upsert_contact(&contact) {
             log::warn!("could not save a contact: {error}");
         }
-        self.emit(Event::Contacts(vec![contact]));
+        match &mut self.contact_batch {
+            // A history chunk sends its names to the interface at once.
+            Some(batch) => batch.push(contact),
+            None => self.emit(Event::Contacts(vec![contact])),
+        }
         self.refresh_chat_name(id);
     }
 
@@ -3510,6 +3636,9 @@ impl Worker {
     /// Applies the phone's read and the reactions that arrived before this
     /// message was filed. Returns whether the phone had read it.
     fn settle_early_events(&mut self, chat: &str, id: &str) -> bool {
+        if !self.early.waiting(chat, id) {
+            return false;
+        }
         let Ok(Some(message)) = self.archive.message(chat, id) else {
             return false;
         };
@@ -3921,10 +4050,25 @@ impl Worker {
                 self.emit(Event::SyncProgress(progress.min(100)));
             }
         }
+        let chunk = HISTORY_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let started = Instant::now();
         let compressed = lazy.compressed_bytes().clone();
+        let size = compressed.len();
         let parsed = tokio::task::spawn_blocking(move || parse_history(&compressed)).await;
+        let read = started.elapsed();
         match parsed {
             Ok(Ok(parsed)) => {
+                // Counts and timings only. Opening a chat waits behind the
+                // saving, so a long one explains "Loading chat history".
+                let counts = (
+                    parsed.chats.len(),
+                    parsed
+                        .chats
+                        .iter()
+                        .map(|chat| chat.messages.len())
+                        .sum::<usize>(),
+                    parsed.push_names.len(),
+                );
                 if on_demand {
                     log::info!(
                         "poll recovery: on-demand history received; chats={}, messages={}, standalone_votes={}",
@@ -3944,10 +4088,23 @@ impl Worker {
                 if let Err(error) = self.archive.begin_batch() {
                     log::warn!("history is filed without a batch: {error}");
                 }
+                let saving = Instant::now();
                 let filed = self.apply_history(parsed, !on_demand);
                 if let Err(error) = self.archive.end_batch() {
                     log::warn!("could not commit a history chunk: {error}");
                 }
+                log::info!(
+                    "history chunk {chunk}: {}, progress {}, {} KB, {} chats, {} messages, {} names; read {} ms, saved {} ms",
+                    sync_kind(lazy.sync_type()),
+                    lazy.progress()
+                        .map_or_else(|| "unknown".to_owned(), |progress| format!("{progress}%")),
+                    size / 1024,
+                    counts.0,
+                    counts.1,
+                    counts.2,
+                    read.as_millis(),
+                    saving.elapsed().as_millis()
+                );
                 if on_demand {
                     self.answer_older(filed);
                 }
@@ -3963,7 +4120,16 @@ impl Worker {
         if !on_demand && lazy.progress().is_some_and(|progress| progress >= 100) {
             self.sync_deadline = Some(Instant::now() + Duration::from_secs(3));
         }
-        self.emit_chats();
+        // The whole chat list goes to the interface at most once a second
+        // while history streams in; the end of the sync sends it again.
+        if on_demand
+            || self
+                .chats_sent
+                .is_none_or(|sent| sent.elapsed() >= Duration::from_secs(1))
+        {
+            self.chats_sent = Some(Instant::now());
+            self.emit_chats();
+        }
     }
 
     /// Archives a history chunk. `metadata` controls chat-state updates.
@@ -4008,9 +4174,15 @@ impl Worker {
             }
         }
         let mut filed = Vec::new();
+        self.contact_batch = Some(Vec::new());
         for (id, name) in &parsed.push_names {
             let id = self.canonical_str(id);
             self.remember_push_name(&id, name);
+        }
+        if let Some(batch) = self.contact_batch.take()
+            && !batch.is_empty()
+        {
+            self.emit(Event::Contacts(batch));
         }
         for mut chat in parsed.chats {
             let id = self.canonical_str(&chat.id);
@@ -4098,7 +4270,10 @@ impl Worker {
             }
             let count = chat.messages.len();
             let mut secrets = HashMap::new();
+            // Activity moves once per chat, not once per message.
+            let mut newest = None;
             for message in chat.messages {
+                newest = newest.max(Some(message.timestamp));
                 if let Some(secret) = message
                     .poll_secret
                     .as_deref()
@@ -4197,10 +4372,15 @@ impl Worker {
                 }
                 // History replays and on-demand chunks can repeat a message the
                 // archive already holds; keep the files it already downloaded.
-                if let Ok(Some(existing)) = self.archive.message(&id, &row.id) {
+                // Only content with files can have any, and reading a row back
+                // costs a decrypt and a JSON parse per message.
+                if (row.content.media().is_some()
+                    || matches!(row.content, Content::Interactive { card: Some(_), .. }))
+                    && let Ok(Some(existing)) = self.archive.message(&id, &row.id)
+                {
                     row.content.keep_local_paths(&existing.content);
                 }
-                if let Err(error) = self.archive.insert_message(&row, Some(&raw)) {
+                if let Err(error) = self.archive.insert_history_message(&row, Some(&raw)) {
                     log::warn!("could not store a history message: {error}");
                 }
                 self.settle_early_events(&id, &row.id);
@@ -4214,6 +4394,11 @@ impl Worker {
                     }
                     self.emit_message(&id, &row.id);
                 }
+            }
+            if let Some(newest) = newest
+                && let Err(error) = self.archive.touch_chat(&id, newest)
+            {
+                log::warn!("could not update a chat's activity: {error}");
             }
             for reaction in chat.reactions {
                 self.apply_history_reaction(&id, reaction, &secrets);
@@ -4272,11 +4457,15 @@ impl Worker {
     fn answer_older(&mut self, filed: Vec<(ChatId, usize, Option<bool>)>) {
         for (chat, count, more_on_phone) in filed {
             let more = count > 0 && more_on_phone != Some(false);
-            let Some((_, (before_time, before_id))) = self.pending_older.remove(&chat) else {
+            let Some((asked, (before_time, before_id))) = self.pending_older.remove(&chat) else {
                 // Late responses are already archived; tell the app to page again.
                 self.emit(Event::OlderFetched { chat, more });
                 continue;
             };
+            log::info!(
+                "the phone sent {count} older messages for a chat after {:.1} s (more: {more})",
+                asked.elapsed().as_secs_f32()
+            );
             match self
                 .archive
                 .messages(&chat, Some((before_time, &before_id)), 500)
@@ -4307,6 +4496,10 @@ impl Worker {
             .map(|(chat, _)| chat.clone())
             .collect();
         for chat in expired {
+            log::warn!(
+                "the phone did not send older messages within {} s",
+                PHONE_PATIENCE.as_secs()
+            );
             self.pending_older.remove(&chat);
             self.emit(Event::OlderFetched {
                 chat: chat.clone(),
@@ -4337,6 +4530,15 @@ impl Worker {
         };
         self.pending_older
             .insert(chat.clone(), (Instant::now(), (timestamp, id.clone())));
+        log::info!(
+            "asking the phone for older messages ({}, {} requests waiting)",
+            if id.is_empty() {
+                "chat has none yet"
+            } else {
+                "before the oldest here"
+            },
+            self.pending_older.len()
+        );
         let commands = self.commands.clone();
         tokio::spawn(async move {
             if let Err(error) = client
@@ -6401,7 +6603,14 @@ impl Worker {
     }
 
     fn load_chat(&mut self, chat: ChatId, before: Option<super::PageKey>) {
+        let started = Instant::now();
         self.send_page(&chat, before.clone());
+        if started.elapsed() > Duration::from_millis(100) {
+            log::info!(
+                "reading a chat page from the archive took {} ms",
+                started.elapsed().as_millis()
+            );
+        }
         if before.is_none() && ChatKind::from_id(&chat) == ChatKind::Group {
             // Force group metadata when opening a group.
             self.request_group_info(&chat, false);
@@ -6459,6 +6668,10 @@ impl Worker {
                 return;
             }
         };
+        // Old stickers scroll past by the hundred; asking the phone to
+        // re-upload each expired one swamped it, and its answers to history
+        // requests then took twenty seconds.
+        let may_reupload = base.sticker_message.as_option().is_none();
         let (downloadable, mime, file_name): (Box<dyn Downloadable>, String, Option<String>) =
             if let Some(image) = base.image_message.as_option() {
                 (
@@ -6585,8 +6798,11 @@ impl Worker {
                     Err(error) => {
                         let text = error.to_string();
                         let expired = ["403", "404", "410"].iter().any(|code| text.contains(code));
-                        match (&jid, expired && !media_key.is_empty()) {
-                            (Some(jid), true) => {
+                        let slot = (expired && may_reupload && !media_key.is_empty())
+                            .then(ReuploadSlot::take)
+                            .flatten();
+                        match (&jid, slot) {
+                            (Some(jid), Some(_slot)) => {
                                 // Ask the phone to re-upload expired media, then retry once.
                                 let request = MediaReuploadRequest {
                                     msg_id: &id,
@@ -11522,6 +11738,11 @@ mod receipt_tests {
             channel_pictures: Default::default(),
             sticker_fetches: HashSet::new(),
             prepared_sends: HashMap::new(),
+            contact_batch: None,
+            stickers_due: None,
+            sticker_copies: None,
+            chats_sent: None,
+            coalesce_stickers: false,
             sticker_downloads: HashSet::new(),
             recent_hashes: HashMap::new(),
             emoji_cache: HashMap::new(),

@@ -152,6 +152,9 @@ CREATE TABLE IF NOT EXISTS group_receipts (
     played_at INTEGER,
     PRIMARY KEY (chat, id, recipient)
 );
+-- Learning a privacy id's number rewrites its receipts by recipient; without
+-- this, each of a sync's thousands of mappings scanned the whole table.
+CREATE INDEX IF NOT EXISTS group_receipts_by_recipient ON group_receipts (recipient);
 CREATE TRIGGER IF NOT EXISTS delete_group_receipts AFTER DELETE ON messages BEGIN
     DELETE FROM group_receipts WHERE chat = OLD.chat AND id = OLD.id;
 END;
@@ -405,6 +408,11 @@ impl Archive {
 
     fn prepare(connection: Connection) -> Result<Self> {
         connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        // Every page read is decrypted, and SQLite's default cache (about
+        // 2 MB) let history imports and scans decrypt the same pages over
+        // and over. 256 MB holds a large archive whole; memory is taken only
+        // as pages are read. Sorts and temporary indexes stay in memory too.
+        connection.execute_batch("PRAGMA cache_size = -262144; PRAGMA temp_store = MEMORY;")?;
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(labels::SCHEMA)?;
         connection.execute_batch(polls::SCHEMA)?;
@@ -867,9 +875,12 @@ impl Archive {
     /// Returns all recorded attachment paths.
     pub fn media_paths(&self) -> Result<Vec<(String, String, std::path::PathBuf)>> {
         let mut statement = self.connection.prepare(
+            // The LIKE rules out, without parsing JSON, every message with no
+            // downloaded file ("path":null): startup runs this over the whole
+            // archive, and parsing every row took seconds after a full sync.
             "SELECT chat, id, coalesce(json_extract(content, '$.media.path'),
                  json_extract(content, '$.card.image.path')) AS path
-             FROM messages WHERE path IS NOT NULL",
+             FROM messages WHERE content LIKE '%\"path\":\"%' AND path IS NOT NULL",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -886,7 +897,8 @@ impl Archive {
     pub fn carousel_media_paths(&self) -> Result<Vec<(String, String, usize, std::path::PathBuf)>> {
         let mut statement = self.connection.prepare(
             "SELECT m.chat, m.id, c.key, json_extract(c.value, '$.image.path') AS image_path
-             FROM messages m, json_each(m.content, '$.card.carousel') c WHERE image_path IS NOT NULL",
+             FROM messages m, json_each(m.content, '$.card.carousel') c
+             WHERE m.content LIKE '%\"carousel\":[{%' AND image_path IS NOT NULL",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -979,6 +991,13 @@ impl Archive {
     /// keeps the reactions already stored. Inserting a message is therefore one
     /// write instead of a read followed by a write.
     pub fn insert_message(&self, message: &Message, raw: Option<&[u8]>) -> Result<()> {
+        self.insert_history_message(message, raw)?;
+        self.touch_chat(&message.chat, message.timestamp)
+    }
+
+    /// Files a message without moving its chat's activity, for history that
+    /// files many messages of a chat and calls [`Self::touch_chat`] once.
+    pub fn insert_history_message(&self, message: &Message, raw: Option<&[u8]>) -> Result<()> {
         // Cached: history files thousands of messages in a row.
         self.connection.prepare_cached(
             "INSERT INTO messages (chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, raw, thumbnail, mentions, forwarded, delivered_at, read_at)
@@ -1029,11 +1048,16 @@ impl Archive {
                 status_rank(Delivery::Failed),
             ],
         )?;
+        Ok(())
+    }
+
+    /// Moves a chat's activity up to `timestamp`, never back.
+    pub fn touch_chat(&self, chat: &str, timestamp: i64) -> Result<()> {
         self.connection
             .prepare_cached(
                 "UPDATE chats SET last_activity = MAX(last_activity, ?2) WHERE id = ?1",
             )?
-            .execute(params![message.chat, message.timestamp])?;
+            .execute(params![chat, timestamp])?;
         Ok(())
     }
 
@@ -1207,28 +1231,49 @@ impl Archive {
     /// and get their own shelf, which leaves out locked chats so a sticker
     /// cannot hint at who is behind the lock.
     pub fn recent_stickers(&self, limit: usize, from_me: bool) -> Result<Vec<ArchivedSticker>> {
-        let mut statement = self.connection.prepare(
-            "SELECT json_extract(content, '$.media.path') AS path, MAX(timestamp), raw
+        // Walks the sticker index newest first and stops at `limit` distinct
+        // files with a copy on disk. Grouping every sticker ever received
+        // before taking the newest took seconds after a full history sync,
+        // and the lists are rebuilt after each sticker download.
+        let mut statement = self.connection.prepare_cached(
+            "SELECT json_extract(content, '$.media.path') AS path, timestamp, rowid
              FROM messages
-             WHERE json_extract(content, '$.kind') = 'sticker' AND path IS NOT NULL
-               AND from_me = ?2
+             WHERE json_extract(content, '$.kind') = 'sticker' AND from_me = ?1
                AND (from_me OR NOT EXISTS (
                    SELECT 1 FROM chats WHERE chats.id = messages.chat AND chats.locked))
-             GROUP BY path
-             ORDER BY 2 DESC
-             LIMIT ?1",
+             ORDER BY timestamp DESC",
         )?;
-        let rows = statement.query_map(params![limit as i64, from_me], |row| {
-            Ok(ArchivedSticker {
-                last_used: row.get(1)?,
-                path: std::path::PathBuf::from(row.get::<_, String>(0)?),
-                raw: row.get(2)?,
+        let mut seen = std::collections::HashSet::new();
+        let mut chosen: Vec<(std::path::PathBuf, i64, i64)> = Vec::new();
+        let mut rows = statement.query(params![from_me])?;
+        while chosen.len() < limit
+            && let Some(row) = rows.next()?
+        {
+            let Some(path) = row.get::<_, Option<String>>(0)? else {
+                continue;
+            };
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let path = std::path::PathBuf::from(path);
+            if path.exists() {
+                chosen.push((path, row.get(1)?, row.get(2)?));
+            }
+        }
+        drop(rows);
+        let mut raw = self
+            .connection
+            .prepare_cached("SELECT raw FROM messages WHERE rowid = ?1")?;
+        chosen
+            .into_iter()
+            .map(|(path, last_used, row)| {
+                Ok(ArchivedSticker {
+                    last_used,
+                    path,
+                    raw: raw.query_row([row], |row| row.get(0))?,
+                })
             })
-        })?;
-        Ok(rows
-            .flatten()
-            .filter(|sticker| sticker.path.exists())
-            .collect())
+            .collect()
     }
 
     /// Returns undownloaded stickers we sent, newest first, for Recent.

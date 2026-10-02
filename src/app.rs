@@ -24,6 +24,9 @@ use crate::theme::{self, Palette};
 /// Initial and incremental message-page size.
 pub const PAGE: usize = 60;
 /// Minimum delay between phone history requests.
+/// A chat whose archived history is shorter than this asks the phone for
+/// more as soon as it opens.
+const PREFETCH_BELOW: usize = 60;
 const PHONE_COOLDOWN: Duration = Duration::from_secs(6);
 /// WhatsApp message-edit window.
 pub const EDIT_WINDOW: Duration = Duration::from_secs(15 * 60);
@@ -2186,13 +2189,17 @@ impl App {
                     } else if was_empty {
                         conversation.complete = complete;
                     }
-                    // Request phone history when sync created a chat without messages.
+                    // Request phone history when sync created a chat without messages,
+                    // and ahead of the reader when the archive holds little of the
+                    // chat or has just run out: the phone takes 10 to 20 seconds.
                     let bare = !older && complete && conversation.messages.is_empty();
+                    let prefetch =
+                        complete && (older || conversation.messages.len() < PREFETCH_BELOW);
                     if self.open_chat.as_deref() == Some(chat.as_str()) {
                         if !older && (self.at_bottom || was_empty) {
                             self.scroll_to_bottom = true;
                         }
-                        if bare {
+                        if bare || prefetch {
                             self.fetch_older(&chat);
                         }
                         // After the first page, load toward a pending search anchor once.
@@ -3049,13 +3056,19 @@ impl App {
                 {
                     self.voice_wanted = None;
                 }
+                let kind = crate::backend::failure_kind(&error);
                 // Show expired-file failures in the bubble, not as a toast.
                 let notice = if error.contains("403") || error.contains("404") {
                     "No longer available on WhatsApp's servers".to_owned()
                 } else {
                     error
                 };
-                log::warn!("attachment download failed; details are shown in the bubble");
+                // The bubble shows the details; the log names only the kind.
+                if kind == "gone from WhatsApp's servers" {
+                    log::debug!("attachment download failed: {kind}");
+                } else {
+                    log::warn!("attachment download failed: {kind}");
+                }
                 media.state = MediaState::Failed(notice);
             }
         }
